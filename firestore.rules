@@ -1,0 +1,154 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: designs
+    // Document ID: designId (string)
+    // Fields:
+    //   - id: string (required)
+    //   - categoryId: string (required)
+    //   - name: string (required, < 100 chars)
+    //   - description: string (required, < 1000 chars)
+    //   - thumbnail: string (required, valid URL)
+    //   - thumbnailColor: string (required, < 100 chars)
+    //   - layoutType: string (required, enum)
+    //   - defaultData: map (required)
+    //   - createdAt: timestamp (required)
+    //   - authorUid: string (required)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (
+          (request.auth.token.email == "awarvandsara@gmail.com" && request.auth.token.email_verified == true) ||
+          (request.auth.token.email != null && request.auth.token.email.lower() == "adminawaz@gmail.com") ||
+          exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+          (request.auth.token.email_verified == true &&
+           exists(/databases/$(database)/documents/admins/$(request.auth.token.email.lower()))) ||
+          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
+        );
+    }
+
+    function isValidUrl(url) {
+      return url is string && (url.matches("^https://.*") || url.matches("^http://.*") || url.matches("^data:image/.*"));
+    }
+
+    function isValidDesign(data) {
+      return data.keys().hasAll(['id', 'categoryId', 'name', 'description', 'thumbnail', 'thumbnailColor', 'layoutType', 'defaultData', 'createdAt', 'authorUid']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.description is string && data.description.size() > 0 && data.description.size() < 1000 &&
+             isValidUrl(data.thumbnail) &&
+             data.thumbnailColor is string && data.thumbnailColor.size() < 100 &&
+             data.layoutType in ['classic', 'modern', 'colorful', 'minimal', 'typographic', 'elegant'] &&
+             data.defaultData is map &&
+             data.createdAt is timestamp &&
+             data.authorUid is string;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /designs/{designId} {
+      // Allow everyone to read designs
+      allow get: if true;
+      allow list: if true;
+      // Allow authenticated users to create designs
+      allow create: if isAuthenticated() && isValidDesign(request.resource.data);
+      // Allow owners or admins to update/delete
+      allow update: if (isOwner(resource.data.authorUid) && isValidDesign(request.resource.data)) || isAdmin();
+      allow delete: if isOwner(resource.data.authorUid) || isAdmin();
+    }
+
+    match /orders/{orderId} {
+      // Users can read their own orders, admins can read all
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      // Paid checkout orders are server-side only. Customers can still request a zero-price quote.
+      allow create: if isAuthenticated() &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.source == 'custom' &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.paymentStatus == 'unpaid' &&
+        request.resource.data.paymentMethod == 'quote_request' &&
+        request.resource.data.totalPrice == 0 &&
+        request.resource.data.currency == 'EUR' &&
+        request.resource.data.quantity == 0 &&
+        request.resource.data.items is list &&
+        request.resource.data.items.size() == 0 &&
+        !request.resource.data.keys().hasAny(['totalAmount', 'stripeCheckoutSessionId', 'stripePaymentIntentId', 'paidAt']);
+      // Only admins can update or delete orders
+      allow update, delete: if isAdmin();
+    }
+
+    match /suppliers/{supplierId} {
+      allow read, create, update, delete: if isAdmin();
+    }
+
+    match /services/{serviceId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /portfolioItems/{portfolioItemId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /admins/{adminId} {
+      allow get: if isAdmin() ||
+        (isAuthenticated() && request.auth.uid == adminId) ||
+        (isAuthenticated() && request.auth.token.email_verified == true && request.auth.token.email.lower() == adminId);
+      allow list, create, update, delete: if isAdmin();
+    }
+
+    match /favorites/{favoriteId} {
+      // Users can read their own favorites
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      // Authenticated users can create/delete their own favorites
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) &&
+        request.resource.data.uid == request.auth.uid &&
+        request.resource.data.role == 'customer' &&
+        request.resource.data.status == 'active';
+      allow update: if (
+        isOwner(userId) &&
+        (
+          request.resource.data.uid == resource.data.uid ||
+          (!resource.data.keys().hasAny(['uid']) && request.resource.data.uid == request.auth.uid)
+        ) &&
+        (
+          request.resource.data.role == resource.data.role ||
+          (!resource.data.keys().hasAny(['role']) && request.resource.data.role == 'customer')
+        ) &&
+        (
+          request.resource.data.status == resource.data.status ||
+          (!resource.data.keys().hasAny(['status']) && request.resource.data.status == 'active')
+        )
+      ) || isAdmin();
+      allow delete: if isAdmin();
+    }
+  }
+}

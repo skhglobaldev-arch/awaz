@@ -1,0 +1,98 @@
+{
+  "entities": {
+    "Design": {
+      "title": "Design",
+      "description": "An AI-generated design template.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "categoryId": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "thumbnail": { "type": "string" },
+        "thumbnailColor": { "type": "string" },
+        "layoutType": { "type": "string" },
+        "defaultData": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "authorUid": { "type": "string" }
+      },
+      "required": ["id", "categoryId", "name", "thumbnail", "layoutType", "defaultData", "createdAt", "authorUid"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "A print order placed by a user.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "fullName": { "type": "string" },
+        "phone": { "type": "string" },
+        "address": { "type": "string" },
+        "quantity": { "type": "number" },
+        "orderType": { "type": "string", "enum": ["retail", "wholesale"] },
+        "templateId": { "type": "string" },
+        "totalPrice": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "paid", "shipped", "delivered"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "supplierId": { "type": "string" },
+        "supplierStatus": { "type": "string", "enum": ["unassigned", "assigned", "in_production", "ready", "dispatched"] }
+      },
+      "required": ["id", "userId", "fullName", "phone", "address", "quantity", "orderType", "templateId", "totalPrice", "status", "createdAt"]
+    },
+    "Favorite": {
+      "title": "Favorite",
+      "description": "A template favorited by a user.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "templateId": { "type": "string" },
+        "savedAt": { "type": "number" }
+      },
+      "required": ["userId", "templateId", "savedAt"]
+    },
+    "Admin": {
+      "title": "Admin",
+      "description": "An administrator of the application.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string" }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "Supplier": {
+      "title": "Supplier",
+      "description": "A printing house supplier.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "contactInfo": { "type": "string" }
+      },
+      "required": ["id", "name"]
+    }
+  },
+  "firestore": {
+    "/designs/{designId}": {
+      "schema": { "$ref": "Design" },
+      "description": "Collection of all AI-generated designs."
+    },
+    "/orders/{orderId}": {
+      "schema": { "$ref": "Order" },
+      "description": "Collection of all print orders."
+    },
+    "/favorites/{favoriteId}": {
+      "schema": { "$ref": "Favorite" },
+      "description": "Collection of user favorite templates."
+    },
+    "/admins/{uid}": {
+      "schema": { "$ref": "Admin" },
+      "description": "Collection of system administrators."
+    },
+    "/suppliers/{supplierId}": {
+      "schema": { "$ref": "Supplier" },
+      "description": "Collection of printing suppliers."
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "name": "awaz---design-&-print-studio",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "npm run build:static && python3 -m http.server 5173 --bind 0.0.0.0 --directory dist",
+    "build": "npm run build:static",
+    "build:static": "node scripts/build-static.mjs",
+    "lint": "tsc --noEmit",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@google/genai": "^1.30.0",
+    "@tailwindcss/vite": "^4.2.2",
+    "firebase": "^12.11.0",
+    "html2canvas": "^1.4.1",
+    "lucide-react": "^0.554.0",
+    "motion": "^12.38.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "tailwindcss": "^4.2.2"
+  },
+  "devDependencies": {
+    "@rolldown/pluginutils": "^1.0.1",
+    "@types/node": "^22.14.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0"
+  }
+}

@@ -1,0 +1,41 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+functions/node_modules
+node_modules.broken-*/
+dist
+dist-ssr
+*.local
+.env
+.env.*
+!.env.example
+.firebase/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Local AI Studio / duplicate exports
+migrated_prompt_history/
+* 2.ts
+* 2.tsx
+* 2.css
+* 2.json
+* 3.ts
+* 3.tsx
+* 3.css
+* 3.json
