@@ -3,6 +3,7 @@ import { Template, MenuData, MenuItem, MenuSection } from '../types';
 import { FONT_OPTIONS } from '../constants';
 import { ArrowRight, Plus, Trash2, Download, Printer, Wand2, RefreshCw, ChevronDown, ChevronUp, Image as ImageIcon, Palette, Type, X, Upload, ZoomIn, ZoomOut, Maximize, FileText, Menu, Eye, PenTool, Sparkles, ImagePlus } from 'lucide-react';
 import { generateDescription, generateBusinessCardContent, generateBackgroundImage, suggestMenuItems, generateLogo, getLastAiErrorMessage } from '../services/geminiService';
+import { chargeDesignDownload } from '../services/creditService';
 import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { db, auth } from '../firebase';
 import { useLanguage } from '../LanguageContext';
@@ -78,6 +79,7 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
   const { t, language } = useLanguage();
   const isRtl = language === 'fa' || language === 'ar';
   const user = auth.currentUser;
+  const creditText = (cost: number) => `${cost} ${t('ai_credit_unit')}`;
   const [data, setData] = useState<MenuData>(() => {
     const defaultData = template.defaultData || {};
     return {
@@ -131,6 +133,30 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
     return () => observer.disconnect();
   }, [pageSize]);
 
+  useEffect(() => {
+    const guardPreview = (event: Event) => {
+      const target = event.target as Node | null;
+      if (target && printRef.current?.contains(target)) {
+        event.preventDefault();
+      }
+    };
+    const guardKeys = (event: KeyboardEvent) => {
+      if (event.key === 'PrintScreen') {
+        alert(t('ai_credit_screenshot_note'));
+      }
+    };
+    document.addEventListener('contextmenu', guardPreview);
+    document.addEventListener('dragstart', guardPreview);
+    document.addEventListener('copy', guardPreview);
+    document.addEventListener('keydown', guardKeys);
+    return () => {
+      document.removeEventListener('contextmenu', guardPreview);
+      document.removeEventListener('dragstart', guardPreview);
+      document.removeEventListener('copy', guardPreview);
+      document.removeEventListener('keydown', guardKeys);
+    };
+  }, [t]);
+
   // --- Auto Generation Handlers ---
   const requireAiLogin = () => {
     if (auth.currentUser) return true;
@@ -141,7 +167,7 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
   const handleAutoHeader = async () => {
     if (!requireAiLogin()) return;
     setIsGeneratingHeader(true);
-    const result = await generateBusinessCardContent(data.title, data.subtitle || "");
+    const result = await generateBusinessCardContent(data.title, data.subtitle || "", language);
     setData(prev => ({
       ...prev,
       subtitle: result.slogan,
@@ -156,7 +182,7 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
 
     setIsGeneratingBg(true);
     try {
-      const bg = await generateBackgroundImage(theme, pageSize === 'A4' ? '9:16' : '1:1');
+      const bg = await generateBackgroundImage(theme, pageSize === 'A4' ? '9:16' : '1:1', language);
       if (bg) {
         setData(prev => ({ ...prev, backgroundImage: bg }));
       } else {
@@ -181,7 +207,7 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
 
     setIsGeneratingLogo(true);
     try {
-      const logo = await generateLogo(data.title, template.categoryId);
+      const logo = await generateLogo(data.title, template.categoryId, language);
       if (logo) {
         setData(prev => ({ ...prev, logo }));
       } else {
@@ -206,7 +232,7 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
   const handleAutoItems = async (sectionId: string) => {
     if (!requireAiLogin()) return;
     setIsGenerating(sectionId);
-    const items = await suggestMenuItems(data.title);
+    const items = await suggestMenuItems(data.title, language);
     if (items.length) {
       setData(prev => ({
         ...prev,
@@ -404,7 +430,7 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
   const handleAutoDescription = async (sectionId: string, itemId: string, name: string) => {
     if (!requireAiLogin()) return;
     setIsGenerating(itemId);
-    const desc = await generateDescription(name, template.categoryId);
+    const desc = await generateDescription(name, template.categoryId, language);
     updateItem(sectionId, itemId, 'description', desc);
     setIsGenerating(null);
   };
@@ -412,6 +438,7 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
   // --- Export Logic ---
   const handleDownload = async () => {
     if (!printRef.current) return;
+    if (!requireAiLogin()) return;
     
     try {
       // @ts-ignore
@@ -433,13 +460,14 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
           }
         }
       });
+      await chargeDesignDownload({ source: 'editor', designId: template.id, categoryId: String(template.categoryId) });
       const link = document.createElement('a');
       link.download = `awaz-menu-${pageSize}-${Date.now()}.png`;
       link.href = canvas.toDataURL('image/png');
       link.click();
     } catch (err) {
       console.error('Export failed', err);
-      alert(t('editor_msg_generation_error'));
+      alert(getLastAiErrorMessage() || t('ai_credit_download_error'));
     }
   };
 
@@ -1000,7 +1028,7 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
                     <div className="p-1 bg-violet-100 rounded-md group-hover:bg-violet-600 group-hover:text-white transition-colors">
                       {isGeneratingHeader ? <RefreshCw size={12} className="animate-spin" /> : <Sparkles size={12} />}
                     </div>
-                    <span className="text-[9px] font-bold text-slate-700">{t('editor_generate')}</span>
+                    <span className="text-[9px] font-bold text-slate-700">{t('editor_generate')} - {creditText(1)}</span>
                   </button>
                   <button 
                     onClick={openBackgroundPrompt}
@@ -1010,7 +1038,7 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
                     <div className="p-1 bg-fuchsia-100 rounded-md group-hover:bg-fuchsia-600 group-hover:text-white transition-colors">
                       {isGeneratingBg ? <RefreshCw size={12} className="animate-spin" /> : <ImagePlus size={12} />}
                     </div>
-                    <span className="text-[9px] font-bold text-slate-700">{t('editor_auto_background')}</span>
+                    <span className="text-[9px] font-bold text-slate-700">{t('editor_auto_background')} - {creditText(5)}</span>
                   </button>
                 </div>
               </div>
@@ -1024,7 +1052,7 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
                     className="text-violet-600 hover:bg-violet-50 p-1 rounded text-xs flex items-center gap-1 font-bold"
                   >
                     {isGeneratingHeader ? <RefreshCw size={12} className="animate-spin"/> : <Sparkles size={12}/>}
-                    {t('editor_generate')}
+                    {t('editor_generate')} - {creditText(1)}
                   </button>
                 </div>
                 <div className="space-y-3">
@@ -1052,10 +1080,11 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
                             <button 
                               onClick={(e) => { e.stopPropagation(); handleAutoItems(section.id); }} 
                               disabled={isGenerating === section.id}
-                              className="text-violet-500 hover:text-violet-700 p-1"
+                              className="text-violet-500 hover:text-violet-700 p-1 flex items-center gap-1 text-[10px] font-black"
                               title={t('editor_tooltip_auto_items')}
                             >
                               {isGenerating === section.id ? <RefreshCw size={14} className="animate-spin"/> : <Sparkles size={14}/>}
+                              <span>{creditText(1)}</span>
                             </button>
                             <button onClick={(e) => { e.stopPropagation(); removeSection(section.id); }} className="text-red-400 hover:text-red-600 p-1"><Trash2 size={14}/></button>
                             {expandedSection === section.id ? <ChevronUp size={16} className="text-slate-400"/> : <ChevronDown size={16} className="text-slate-400"/>}
@@ -1071,8 +1100,9 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
                                 </div>
                                 <div className="relative">
                                   <textarea rows={2} value={item.description} onChange={(e) => updateItem(section.id, item.id, 'description', e.target.value)} className="w-full text-xs border border-slate-200 rounded p-2 resize-none" placeholder={t('editor_placeholder_item_desc')}/>
-                                  <button onClick={() => handleAutoDescription(section.id, item.id, item.name)} disabled={isGenerating === item.id} className="absolute bottom-2 left-2 text-blue-500 hover:text-blue-700 p-1 rounded bg-blue-50" title={t('editor_generate')}>
+                                  <button onClick={() => handleAutoDescription(section.id, item.id, item.name)} disabled={isGenerating === item.id} className="absolute bottom-2 left-2 text-blue-500 hover:text-blue-700 p-1 rounded bg-blue-50 flex items-center gap-1 text-[10px] font-black" title={t('editor_generate')}>
                                     {isGenerating === item.id ? <RefreshCw size={12} className="animate-spin"/> : <Sparkles size={12} />}
+                                    <span>{creditText(1)}</span>
                                   </button>
                                 </div>
                                 <button onClick={() => removeItem(section.id, item.id)} className="absolute -right-2 -top-2 bg-white border text-red-400 p-1 rounded-full opacity-0 group-hover:opacity-100 transition-opacity shadow-sm hover:text-red-600"><Trash2 size={12}/></button>
@@ -1109,7 +1139,7 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
                  <h3 className="text-sm font-black text-slate-800 border-b pb-2 mb-4">{t('editor_label_typography')}</h3>
                  <div className="space-y-4">
                     <div>
-                       <label className="block text-xs text-slate-500 mb-1">{t('editor_label_font_title')}</label>
+                       <label className="block text-xs text-slate-500 mb-1">{t('editor_label_title_font')}</label>
                        <select value={data.fonts.title} onChange={(e) => handleFontChange('title', e.target.value)} className="w-full text-sm p-2 border border-slate-200 rounded-lg bg-white">
                          <optgroup label={t('editor_label_standard')}>
                            {FONT_OPTIONS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
@@ -1121,11 +1151,11 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
                          )}
                        </select>
                        <div className="mt-2">
-                          <label className="flex items-center gap-2 text-xs text-blue-600 cursor-pointer hover:text-blue-700"><Upload size={12}/> {t('editor_label_upload_font')} (Title)<input type="file" accept=".ttf,.woff,.woff2" className="hidden" onChange={(e) => handleCustomFontUpload(e, 'title')} /></label>
+                          <label className="flex items-center gap-2 text-xs text-blue-600 cursor-pointer hover:text-blue-700"><Upload size={12}/> {t('editor_label_upload_font')} - {t('editor_label_title_font')}<input type="file" accept=".ttf,.woff,.woff2" className="hidden" onChange={(e) => handleCustomFontUpload(e, 'title')} /></label>
                        </div>
                     </div>
                     <div>
-                       <label className="block text-xs text-slate-500 mb-1">{t('editor_label_font_body')}</label>
+                       <label className="block text-xs text-slate-500 mb-1">{t('editor_label_body_font')}</label>
                        <select value={data.fonts.body} onChange={(e) => handleFontChange('body', e.target.value)} className="w-full text-sm p-2 border border-slate-200 rounded-lg bg-white">
                          <optgroup label={t('editor_label_standard')}>
                            {FONT_OPTIONS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
@@ -1137,7 +1167,7 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
                          )}
                        </select>
                        <div className="mt-2">
-                          <label className="flex items-center gap-2 text-xs text-blue-600 cursor-pointer hover:text-blue-700"><Upload size={12}/> {t('editor_label_upload_font')} (Body)<input type="file" accept=".ttf,.woff,.woff2" className="hidden" onChange={(e) => handleCustomFontUpload(e, 'body')} /></label>
+                          <label className="flex items-center gap-2 text-xs text-blue-600 cursor-pointer hover:text-blue-700"><Upload size={12}/> {t('editor_label_upload_font')} - {t('editor_label_body_font')}<input type="file" accept=".ttf,.woff,.woff2" className="hidden" onChange={(e) => handleCustomFontUpload(e, 'body')} /></label>
                        </div>
                     </div>
                  </div>
@@ -1165,7 +1195,7 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
                           className="text-violet-600 hover:bg-violet-50 p-1 rounded text-[10px] flex items-center gap-1 font-bold border border-violet-100"
                         >
                           {isGeneratingLogo ? <RefreshCw size={10} className="animate-spin"/> : <Sparkles size={10}/>}
-                          {t('editor_button_auto_logo')}
+                          {t('editor_button_auto_logo')} - {creditText(5)}
                         </button>
                       </div>
                       <div className="flex items-center gap-3">
@@ -1189,7 +1219,7 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
                           className="text-violet-600 hover:bg-violet-50 p-1 rounded text-[10px] flex items-center gap-1 font-bold border border-violet-100"
                         >
                           {isGeneratingBg ? <RefreshCw size={10} className="animate-spin"/> : <Sparkles size={10}/>}
-                          {t('editor_button_auto_bg')}
+                          {t('editor_button_auto_bg')} - {creditText(5)}
                         </button>
                       </div>
                        <div className="flex items-center gap-3">
@@ -1272,7 +1302,7 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
         <div className="p-4 bg-white border-t border-slate-200 space-y-2 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] z-30">
           <button onClick={handleDownload} className="w-full bg-slate-800 hover:bg-slate-900 text-white py-3 rounded-xl font-medium flex items-center justify-center gap-2 shadow-lg shadow-slate-200 transition-all">
             <Download size={18} />
-            {t('editor_button_download_png')}
+            {t('editor_button_download_png')} - {creditText(2)}
           </button>
           <button onClick={handleSaveToPortfolio} disabled={isSaving} className="w-full bg-violet-600 hover:bg-violet-700 text-white py-3 rounded-xl font-medium flex items-center justify-center gap-2 shadow-lg shadow-violet-200 transition-all">
             {isSaving ? <RefreshCw size={18} className="animate-spin"/> : <ImageIcon size={18} />}
@@ -1340,6 +1370,9 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
               <div 
                 id="printable-area"
                 ref={printRef}
+                className="select-none"
+                onContextMenu={(event) => event.preventDefault()}
+                onDragStart={(event) => event.preventDefault()}
                 style={{
                    width: dims.width,
                    height: dims.height,

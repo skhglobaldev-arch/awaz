@@ -96,7 +96,8 @@ export const TemplateSelector: React.FC<TemplateSelectorProps> = ({
   initialCategory,
   showTemplatesOnLoad = false
 }) => {
-  const { t, isRtl } = useLanguage();
+  const { t, isRtl, language } = useLanguage();
+  const creditText = (cost: number) => `${cost} ${t('ai_credit_unit')}`;
   const [activeCategory, setActiveCategory] = useState<CategoryId | 'FAVORITES'>(initialCategory || CATEGORIES[0].id);
   const [searchQuery, setSearchQuery] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
@@ -175,7 +176,8 @@ export const TemplateSelector: React.FC<TemplateSelectorProps> = ({
         businessName,
         industry,
         subIndustry,
-        itemType
+        itemType,
+        language
       );
 
       if (template) {
@@ -564,7 +566,7 @@ export const TemplateSelector: React.FC<TemplateSelectorProps> = ({
                     </div>
                   </div>
                   <div className="rounded-xl border border-cyan-400/20 bg-cyan-400/10 px-3 py-2 text-[10px] font-black text-cyan-100">
-                    AI Credit: {aiCredits ?? '-'}
+                    {t('ai_credit_label')}: {aiCredits ?? '-'}
                   </div>
                 </div>
 
@@ -699,7 +701,7 @@ export const TemplateSelector: React.FC<TemplateSelectorProps> = ({
                             ) : (
                               <>
                                 <Sparkles size={16} className="group-hover/btn:rotate-12 transition-transform" />
-                                <span className="text-xs md:text-base">{t('ts_gen_button')}</span>
+                                <span className="text-xs md:text-base">{t('ts_gen_button')} - {creditText(1)}</span>
                               </>
                             )}
                           </button>

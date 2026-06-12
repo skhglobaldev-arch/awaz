@@ -7,6 +7,7 @@ import { signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged, User 
 import { doc, getDoc, onSnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
 import { useLanguage } from '../LanguageContext';
 import { Language } from '../translations';
+import { refreshAiCreditStatus } from '../services/creditService';
 
 interface NavbarProps {
   onNavigateHome: () => void;
@@ -70,6 +71,9 @@ export const Navbar: React.FC<NavbarProps> = ({ onNavigateHome, onNavigateMockup
 
       try {
         await ensureCustomerProfile(user);
+        refreshAiCreditStatus().catch((creditError) => {
+          console.warn('AI credit status refresh failed', creditError);
+        });
         unsubscribeProfile = onSnapshot(doc(db, 'users', user.uid), (snapshot) => {
           const value = snapshot.data()?.aiCreditsBalance;
           setAiCredits(typeof value === 'number' ? value : null);

@@ -2,10 +2,11 @@
 import React, { useState, useEffect } from 'react';
 import { auth, db } from '../firebase';
 import { collection, query, where, onSnapshot, orderBy, deleteDoc, doc } from 'firebase/firestore';
-import { Layout, Package, Star, Trash2, ExternalLink, Clock, CheckCircle2, Truck, ShoppingBag, Wand2, LogOut } from 'lucide-react';
+import { Layout, Package, Star, Trash2, ExternalLink, Clock, CheckCircle2, Truck, ShoppingBag, Wand2, LogOut, Sparkles, CreditCard } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { OrderData, Template, CategoryId } from '../types';
 import { useLanguage } from '../LanguageContext';
+import { AiCreditStatus, createCreditCheckout, refreshAiCreditStatus } from '../services/creditService';
 
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 
@@ -71,6 +72,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ onBack, onSelectTemplate }
   const [orders, setOrders] = useState<OrderData[]>([]);
   const [favorites, setFavorites] = useState<any[]>([]);
   const [customerCode, setCustomerCode] = useState('');
+  const [aiCreditStatus, setAiCreditStatus] = useState<AiCreditStatus | null>(null);
+  const [buyingPackId, setBuyingPackId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const { t, isRtl, language } = useLanguage();
   const numberLocale = { fa: 'fa-IR', en: 'en-IE', de: 'de-DE', fr: 'fr-FR', ar: 'ar-SA' }[language];
@@ -122,8 +125,28 @@ export const Dashboard: React.FC<DashboardProps> = ({ onBack, onSelectTemplate }
     });
 
     const unsubscribeProfile = onSnapshot(doc(db, 'users', user.uid), (snapshot) => {
-      setCustomerCode(snapshot.data()?.customerCode || '');
+      const profile = snapshot.data();
+      setCustomerCode(profile?.customerCode || '');
+      setAiCreditStatus((current) => ({
+        creditsBalance: Number(profile?.aiCreditsBalance ?? current?.creditsBalance ?? 0),
+        creditsTotalUsed: Number(profile?.aiCreditsTotalUsed ?? current?.creditsTotalUsed ?? 0),
+        creditsTotalGranted: Number(profile?.aiCreditsTotalGranted ?? current?.creditsTotalGranted ?? 0),
+        creditsPurchased: Number(profile?.aiCreditsPurchased ?? current?.creditsPurchased ?? 0),
+        freeCreditsGranted: Number(profile?.aiFreeCreditsGranted ?? current?.freeCreditsGranted ?? 0),
+        dailyCreditsUsed: current?.dailyCreditsUsed ?? 0,
+        dailyImageGenerations: current?.dailyImageGenerations ?? 0,
+        dailyCreditLimit: current?.dailyCreditLimit ?? 12,
+        dailyImageLimit: current?.dailyImageLimit ?? 3,
+        plan: profile?.aiPlan || current?.plan || 'free',
+        freeCredits: current?.freeCredits ?? 30,
+        costs: current?.costs || {},
+        packs: current?.packs || {},
+      }));
     });
+
+    refreshAiCreditStatus()
+      .then(setAiCreditStatus)
+      .catch((error) => console.warn('AI credit status failed', error));
 
     // Fetch User Favorites
     const favoritesQuery = query(
@@ -164,6 +187,20 @@ export const Dashboard: React.FC<DashboardProps> = ({ onBack, onSelectTemplate }
       onBack();
     } catch (error) {
       console.error("Logout error:", error);
+    }
+  };
+
+  const handleBuyCredits = async (packId: string) => {
+    try {
+      setBuyingPackId(packId);
+      const checkout = await createCreditCheckout(packId, language);
+      if (!checkout.url) throw new Error('Credit checkout did not return a URL.');
+      window.location.assign(checkout.url);
+    } catch (error) {
+      console.error('Could not open credit checkout:', error);
+      alert(t('ai_credit_checkout_error'));
+    } finally {
+      setBuyingPackId(null);
     }
   };
 
@@ -235,6 +272,49 @@ export const Dashboard: React.FC<DashboardProps> = ({ onBack, onSelectTemplate }
       </div>
 
       <div className="max-w-7xl mx-auto px-4 py-6 sm:py-12">
+        {/* AI Credit */}
+        <div className="mb-8 grid grid-cols-1 gap-4 lg:grid-cols-[1fr_1.2fr]">
+          <div className="rounded-3xl border border-cyan-400/20 bg-cyan-400/10 p-5 sm:p-7">
+            <div className="flex items-center justify-between gap-4">
+              <div className={isRtl ? 'text-right' : 'text-left'}>
+                <p className="text-xs font-black uppercase tracking-widest text-cyan-200">{t('ai_credit_label')}</p>
+                <p className="mt-2 text-4xl font-black text-white">{aiCreditStatus?.creditsBalance ?? '-'}</p>
+                <p className="mt-1 text-xs font-bold text-cyan-100/80">
+                  {t('ai_credit_daily')}: {aiCreditStatus?.dailyCreditsUsed ?? 0}/{aiCreditStatus?.dailyCreditLimit ?? 12}
+                </p>
+              </div>
+              <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-cyan-400/15 text-cyan-200">
+                <Sparkles size={30} />
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-5 sm:p-7">
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <h2 className="text-lg font-black text-white">{t('ai_credit_add_title')}</h2>
+              <CreditCard className="text-slate-400" size={20} />
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              {Object.entries(aiCreditStatus?.packs || {
+                starter: { credits: 50, amountCents: 299 },
+                creator: { credits: 150, amountCents: 699 },
+                studio: { credits: 400, amountCents: 1499 },
+              }).map(([packId, pack]) => (
+                <button
+                  key={packId}
+                  onClick={() => handleBuyCredits(packId)}
+                  disabled={buyingPackId === packId}
+                  className="rounded-2xl border border-white/10 bg-white/5 p-4 text-center transition hover:border-cyan-300/40 hover:bg-white/10 disabled:opacity-60"
+                >
+                  <p className="text-xl font-black text-white">{pack.credits}</p>
+                  <p className="text-xs font-bold text-slate-400">{t('ai_credit_unit')}</p>
+                  <p className="mt-2 text-sm font-black text-cyan-200">{formatEuro(pack.amountCents / 100)}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
         {/* Stats */}
         <div className="grid grid-cols-3 gap-2 sm:gap-6 mb-8 sm:mb-12">
           {[

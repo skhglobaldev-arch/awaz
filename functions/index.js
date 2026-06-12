@@ -15,8 +15,8 @@ const stripeSecretKey = defineSecret('STRIPE_SECRET_KEY');
 const stripeWebhookSecret = defineSecret('STRIPE_WEBHOOK_SECRET');
 const geminiApiKey = defineSecret('GEMINI_API_KEY');
 
-const AI_FREE_GRANT_VERSION = 1;
-const AI_FREE_CREDITS = 10;
+const AI_FREE_GRANT_VERSION = 2;
+const AI_FREE_CREDITS = 30;
 const AI_ACCOUNT_LIMIT_PER_SIGNAL = 2;
 const AI_TASK_COST = {
   description: 1,
@@ -26,14 +26,34 @@ const AI_TASK_COST = {
   template: 1,
   backgroundImage: 5,
   logo: 5,
+  download: 2,
 };
 const AI_IMAGE_TASKS = new Set(['backgroundImage', 'logo']);
 const AI_PLAN_LIMITS = {
-  free: { dailyCredits: 5, dailyImages: 2 },
+  free: { dailyCredits: 12, dailyImages: 3 },
   starter: { dailyCredits: 40, dailyImages: 8 },
   pro: { dailyCredits: 120, dailyImages: 25 },
   business: { dailyCredits: 400, dailyImages: 80 },
   admin: { dailyCredits: 1000, dailyImages: 200 },
+};
+const CREDIT_PACKS = {
+  starter: { credits: 50, amountCents: 299 },
+  creator: { credits: 150, amountCents: 699 },
+  studio: { credits: 400, amountCents: 1499 },
+};
+const CREDIT_PACK_NAMES = {
+  fa: 'اعتبار هوش مصنوعی آواز',
+  en: 'Awaz AI credits',
+  de: 'Awaz KI-Credits',
+  fr: 'Crédits IA Awaz',
+  ar: 'رصيد الذكاء الاصطناعي من Awaz',
+};
+const LANGUAGE_PROFILES = {
+  fa: { visible: 'Persian/Farsi', culture: 'Iranian and Persian-speaking print market', samplePhone: '۰۹۱۲ ۰۰۰ ۰۰۰۰', sampleEmail: 'info@example.com' },
+  en: { visible: 'English', culture: 'modern English-speaking European/US business market', samplePhone: '+44 20 0000 0000', sampleEmail: 'hello@example.com' },
+  de: { visible: 'German', culture: 'German-speaking DACH market with precise, trustworthy, restrained communication', samplePhone: '+49 30 000000', sampleEmail: 'kontakt@example.de' },
+  fr: { visible: 'French', culture: 'French market with elegant, refined, concise brand language', samplePhone: '+33 1 00 00 00 00', sampleEmail: 'bonjour@example.fr' },
+  ar: { visible: 'Arabic', culture: 'Arabic-speaking MENA market with premium RTL composition and culturally respectful wording', samplePhone: '+971 50 000 0000', sampleEmail: 'info@example.com' },
 };
 
 const UNIT_PRICE_CENTS = {
@@ -102,6 +122,11 @@ function checkoutLanguage(value) {
   return Object.prototype.hasOwnProperty.call(STRIPE_LOCALES, value) ? value : 'en';
 }
 
+function languageProfile(value) {
+  const language = checkoutLanguage(value);
+  return { language, ...LANGUAGE_PROFILES[language] };
+}
+
 function localizedProductName(input, source, language) {
   const productKey = source === 'mockup' ? text(input.productId, 80) : text(input.productId, 120);
   const knownProduct = source === 'mockup' ? MOCKUP_PRODUCT_NAMES[productKey] : EDITOR_PRODUCT_NAMES[productKey];
@@ -167,6 +192,25 @@ function nextSignalAccounts(snapshot, uid) {
   return accounts.includes(uid) ? accounts : [...accounts, uid].slice(0, 25);
 }
 
+function aiStatusPayload(userData, dailyData, plan, limits, extra = {}) {
+  return {
+    creditsBalance: Math.floor(safeNumber(userData.aiCreditsBalance, 0)),
+    creditsTotalUsed: Math.floor(safeNumber(userData.aiCreditsTotalUsed, 0)),
+    creditsTotalGranted: Math.floor(safeNumber(userData.aiCreditsTotalGranted, 0)),
+    creditsPurchased: Math.floor(safeNumber(userData.aiCreditsPurchased, 0)),
+    freeCreditsGranted: Math.floor(safeNumber(userData.aiFreeCreditsGranted, 0)),
+    dailyCreditsUsed: Math.floor(safeNumber(dailyData && dailyData.creditsUsed, 0)),
+    dailyImageGenerations: Math.floor(safeNumber(dailyData && dailyData.imageGenerations, 0)),
+    dailyCreditLimit: limits.dailyCredits,
+    dailyImageLimit: limits.dailyImages,
+    plan,
+    freeCredits: AI_FREE_CREDITS,
+    costs: AI_TASK_COST,
+    packs: CREDIT_PACKS,
+    ...extra,
+  };
+}
+
 async function reserveAiCredits(request, task, input) {
   const cost = AI_TASK_COST[task];
   if (!cost) throw new HttpsError('invalid-argument', 'Unknown AI task.');
@@ -196,12 +240,13 @@ async function reserveAiCredits(request, task, input) {
     let balance = Math.floor(safeNumber(userData.aiCreditsBalance, 0));
     let totalGranted = Math.floor(safeNumber(userData.aiCreditsTotalGranted, 0));
     const totalUsed = Math.floor(safeNumber(userData.aiCreditsTotalUsed, 0));
-    const freeAlreadyGranted = Number(userData.aiFreeGrantVersion || 0) >= AI_FREE_GRANT_VERSION;
-    const freeGrantBlocked = !freeAlreadyGranted && (signalBlocked(deviceSnapshot, uid) || signalBlocked(ipSnapshot, uid));
+    const grantedSoFar = Math.floor(safeNumber(userData.aiFreeCreditsGranted, 0));
+    const grantTopUp = Math.max(0, AI_FREE_CREDITS - grantedSoFar);
+    const freeGrantBlocked = grantTopUp > 0 && (signalBlocked(deviceSnapshot, uid) || signalBlocked(ipSnapshot, uid));
 
-    if (!freeAlreadyGranted && !freeGrantBlocked) {
-      balance += AI_FREE_CREDITS;
-      totalGranted += AI_FREE_CREDITS;
+    if (grantTopUp > 0 && !freeGrantBlocked) {
+      balance += grantTopUp;
+      totalGranted += grantTopUp;
     }
     if (plan === 'admin' && balance < 1000) {
       totalGranted += 1000 - balance;
@@ -247,12 +292,12 @@ async function reserveAiCredits(request, task, input) {
       aiLastTask: task,
       aiLastUsedAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
-      ...(freeAlreadyGranted ? {} : {
+      ...(grantTopUp > 0 ? {
         aiFreeGrantVersion: AI_FREE_GRANT_VERSION,
-        aiFreeCreditsGranted: freeGrantBlocked ? 0 : AI_FREE_CREDITS,
+        aiFreeCreditsGranted: freeGrantBlocked ? grantedSoFar : grantedSoFar + grantTopUp,
         aiFreeGrantedAt: freeGrantBlocked ? null : FieldValue.serverTimestamp(),
         aiFreeGrantBlocked: freeGrantBlocked,
-      }),
+      } : {}),
       ...(userSnapshot.exists ? {} : { createdAt: FieldValue.serverTimestamp(), role: 'customer', status: 'active' }),
     };
     transaction.set(userRef, userUpdate, { merge: true });
@@ -381,6 +426,109 @@ async function refundAiCredits(reservation, error) {
   });
 }
 
+exports.getAiCreditStatus = onCall({ region: REGION }, async (request) => {
+  if (!request.auth) {
+    throw new HttpsError('unauthenticated', 'Sign in before reading AI credits.');
+  }
+
+  const input = request.data || {};
+  const uid = request.auth.uid;
+  const authToken = request.auth.token || {};
+  const email = text(authToken.email, 200).toLowerCase() || null;
+  const userRef = db.collection('users').doc(uid);
+  const dailyRef = userRef.collection('aiUsageDaily').doc(todayKey());
+  const deviceHash = hashSignal(input.deviceId);
+  const ipHash = hashSignal(clientIpFromRequest(request));
+  const deviceRef = deviceHash ? db.collection('aiAbuseKeys').doc(`device_${deviceHash}`) : null;
+  const ipRef = ipHash ? db.collection('aiAbuseKeys').doc(`ip_${ipHash}`) : null;
+  let status = null;
+
+  await db.runTransaction(async (transaction) => {
+    const userSnapshot = await transaction.get(userRef);
+    const dailySnapshot = await transaction.get(dailyRef);
+    const deviceSnapshot = deviceRef ? await transaction.get(deviceRef) : null;
+    const ipSnapshot = ipRef ? await transaction.get(ipRef) : null;
+
+    const userData = userSnapshot.exists ? userSnapshot.data() : {};
+    const plan = aiPlan(userData, authToken);
+    const limits = aiLimits(userData, plan);
+    let balance = Math.floor(safeNumber(userData.aiCreditsBalance, 0));
+    let totalGranted = Math.floor(safeNumber(userData.aiCreditsTotalGranted, 0));
+    const grantedSoFar = Math.floor(safeNumber(userData.aiFreeCreditsGranted, 0));
+    const grantTopUp = Math.max(0, AI_FREE_CREDITS - grantedSoFar);
+    const freeGrantBlocked = grantTopUp > 0 && (signalBlocked(deviceSnapshot, uid) || signalBlocked(ipSnapshot, uid));
+
+    if (grantTopUp > 0 && !freeGrantBlocked) {
+      balance += grantTopUp;
+      totalGranted += grantTopUp;
+    }
+    if (plan === 'admin' && balance < 1000) {
+      totalGranted += 1000 - balance;
+      balance = 1000;
+    }
+
+    const update = {
+      uid,
+      email,
+      customerCode: text(userData.customerCode, 30) || customerCodeFromUid(uid),
+      aiPlan: plan === 'admin' ? 'admin' : text(userData.aiPlan, 40) || 'free',
+      aiCreditsBalance: balance,
+      aiCreditsTotalGranted: totalGranted,
+      aiFreeGrantBlocked: freeGrantBlocked,
+      updatedAt: FieldValue.serverTimestamp(),
+      ...(grantTopUp > 0 ? {
+        aiFreeGrantVersion: AI_FREE_GRANT_VERSION,
+        aiFreeCreditsGranted: freeGrantBlocked ? grantedSoFar : grantedSoFar + grantTopUp,
+        aiFreeGrantedAt: freeGrantBlocked ? null : FieldValue.serverTimestamp(),
+      } : {}),
+      ...(userSnapshot.exists ? {} : { createdAt: FieldValue.serverTimestamp(), role: 'customer', status: 'active' }),
+    };
+    transaction.set(userRef, update, { merge: true });
+
+    if (deviceRef) {
+      const accounts = nextSignalAccounts(deviceSnapshot, uid);
+      transaction.set(deviceRef, {
+        type: 'device',
+        hash: deviceHash,
+        accounts,
+        accountCount: accounts.length,
+        updatedAt: FieldValue.serverTimestamp(),
+        ...(deviceSnapshot && deviceSnapshot.exists ? {} : { createdAt: FieldValue.serverTimestamp() }),
+      }, { merge: true });
+    }
+    if (ipRef) {
+      const accounts = nextSignalAccounts(ipSnapshot, uid);
+      transaction.set(ipRef, {
+        type: 'ip',
+        hash: ipHash,
+        accounts,
+        accountCount: accounts.length,
+        updatedAt: FieldValue.serverTimestamp(),
+        ...(ipSnapshot && ipSnapshot.exists ? {} : { createdAt: FieldValue.serverTimestamp() }),
+      }, { merge: true });
+    }
+
+    status = aiStatusPayload({ ...userData, ...update }, dailySnapshot.exists ? dailySnapshot.data() : {}, plan, limits, {
+      freeGrantBlocked,
+      customerCode: update.customerCode,
+    });
+  });
+
+  return status;
+});
+
+exports.chargeDesignDownload = onCall({ region: REGION }, async (request) => {
+  if (!request.auth) {
+    throw new HttpsError('unauthenticated', 'Sign in before downloading.');
+  }
+  const input = request.data || {};
+  const reservation = await reserveAiCredits(request, 'download', {
+    ...input,
+    prompt: `download:${text(input.source, 40)}:${text(input.designId, 120)}`,
+  });
+  return completeAiUsage(reservation, { charged: true });
+});
+
 function safeMockup(input) {
   if (!input || typeof input !== 'object') return null;
   return {
@@ -492,8 +640,22 @@ function designKindFromCategory(categoryId, itemType) {
 }
 
 function fallbackTemplate(input, categoryId) {
+  const profile = languageProfile(input.language);
   const businessName = text(input.businessName, 100) || 'نام کسب و کار';
   const designType = designKindFromCategory(categoryId, input.itemType);
+  const fallbackCopy = profile.language === 'fa'
+    ? {
+      subtitle: 'طراحی حرفه‌ای، خوانا و آماده چاپ',
+      contact: '۰۹۱۲ ۰۰۰ ۰۰۰۰ | info@example.com',
+      customText: 'حاشیه امن، کنتراست مناسب و آماده‌سازی چاپ رعایت شود.',
+      sections: ['معرفی', 'مزیت‌ها', 'خدمت اصلی', 'کیفیت چاپ', 'توضیح کوتاه و قابل چاپ برای معرفی برند', 'رنگ خوانا، چیدمان تمیز و خروجی حرفه‌ای'],
+    }
+    : {
+      subtitle: 'Professional, readable, print-ready design',
+      contact: `${profile.samplePhone} | ${profile.sampleEmail}`,
+      customText: 'Safe margins, strong contrast and print preparation are considered.',
+      sections: ['Introduction', 'Benefits', 'Main service', 'Print quality', 'Short print-friendly brand introduction', 'Readable color, clean layout and professional output'],
+    };
   return {
     id: `custom-template-${Date.now()}`,
     categoryId,
@@ -504,14 +666,14 @@ function fallbackTemplate(input, categoryId) {
     layoutType: 'modern',
     defaultData: {
       title: businessName,
-      subtitle: 'طراحی حرفه‌ای، خوانا و آماده چاپ',
-      contact: '۰۹۱۲ ۰۰۰ ۰۰۰۰ | info@example.com',
+      subtitle: fallbackCopy.subtitle,
+      contact: fallbackCopy.contact,
       colors: { primary: '#1e40af', accent: '#f97316', background: '#ffffff', text: '#111827' },
       fonts: { title: 'Lalezar', body: 'Vazirmatn' },
-      customText: 'حاشیه امن، کنتراست مناسب و آماده‌سازی چاپ رعایت شود.',
+      customText: fallbackCopy.customText,
       sections: [
-        { id: 's1', title: 'معرفی', items: [{ id: 'i1', name: 'خدمت اصلی', price: '', description: 'توضیح کوتاه و قابل چاپ برای معرفی برند' }] },
-        { id: 's2', title: 'مزیت‌ها', items: [{ id: 'i2', name: 'کیفیت چاپ', price: '', description: 'رنگ خوانا، چیدمان تمیز و خروجی حرفه‌ای' }] },
+        { id: 's1', title: fallbackCopy.sections[0], items: [{ id: 'i1', name: fallbackCopy.sections[2], price: '', description: fallbackCopy.sections[4] }] },
+        { id: 's2', title: fallbackCopy.sections[1], items: [{ id: 'i2', name: fallbackCopy.sections[3], price: '', description: fallbackCopy.sections[5] }] },
       ],
     },
   };
@@ -566,6 +728,7 @@ function normalizeTemplate(template, input, categoryId) {
 }
 
 function buildPrintDesignStrategyPrompt(input, categoryId) {
+  const profile = languageProfile(input.language);
   const businessName = text(input.businessName, 100) || 'نام کسب و کار';
   const industryName = text(input.industry, 120) || 'عمومی';
   const subIndustryName = text(input.subIndustry, 120);
@@ -574,19 +737,23 @@ function buildPrintDesignStrategyPrompt(input, categoryId) {
 
   return `
 You are the senior creative director and print-production strategist at Awaz Design & Print Studio.
-Create a commercially usable, print-ready Persian/RTL concept for "${designType}".
+Create a commercially usable, print-ready concept for "${designType}".
 
 Business:
 - Name: ${businessName}
 - Industry: ${industryName}${subIndustryName ? ` / ${subIndustryName}` : ''}
 - Client brief: ${userBrief}
 - Category ID: ${categoryId}
+- Output language: ${profile.visible}
+- Cultural market: ${profile.culture}
 
 Design requirements:
-- Use fluent Persian for all visible copy unless brand, URL, email, or phone.
+- Use fluent ${profile.visible} for all visible copy unless brand, URL, email, or phone.
+- Adapt offer wording, hierarchy, tone, examples, cultural references, and trust signals to ${profile.culture}.
+- Use RTL composition for Persian/Arabic and LTR composition for English/German/French.
 - Respect print-safe hierarchy, bleed/crop safety, readable sizes, high contrast, and CMYK-friendly color choices.
 - Business card: prioritize name, role, contact, memorable identity, minimal back-side information.
-- Brochure: organize into clear panels/sections: معرفی، خدمات، مزیت‌ها، دعوت به اقدام.
+- Brochure: organize into clear localized panels/sections for introduction, services, benefits, credibility, and call to action.
 - Menu: create logical categories, readable prices, appetite-driven short descriptions.
 - Logo: create scalable, iconic, simple brand guidance suitable for signage, stamp, packaging, social media, embroidery and merch.
 
@@ -598,8 +765,8 @@ Return only valid JSON with this structure:
   "layoutType": "modern",
   "defaultData": {
     "title": "${businessName}",
-    "subtitle": "شعار فارسی",
-    "contact": "اطلاعات تماس",
+    "subtitle": "Localized slogan in ${profile.visible}",
+    "contact": "${profile.samplePhone} | ${profile.sampleEmail}",
     "colors": { "primary": "#hex", "accent": "#hex", "background": "#hex", "text": "#hex" },
     "fonts": { "title": "Lalezar", "body": "Vazirmatn" },
     "customText": "یادداشت کوتاه استراتژی چاپ یا CTA",
@@ -641,17 +808,19 @@ exports.generateAiContent = onCall({ region: REGION, secrets: [geminiApiKey], ti
     client = await geminiClient();
 
     if (task === 'description') {
-      const prompt = `برای آیتم منوی "${text(input.itemName, 120)}" در دسته "${text(input.categoryName, 120)}" یک توضیح فارسی کوتاه، اشتهابرانگیز و قابل چاپ بنویس. حداکثر ۱۵ کلمه.`;
+      const profile = languageProfile(input.language);
+      const prompt = `Write one short, appetizing, print-ready menu description in ${profile.visible} for "${text(input.itemName, 120)}" in category "${text(input.categoryName, 120)}". Maximum 15 words. Adapt to ${profile.culture}.`;
       const response = await client.models.generateContent({ model: 'gemini-3-flash-preview', contents: prompt });
       return completeAiUsage(reservation, { text: text(response.text, 500) || 'توضیحات یافت نشد.' });
     }
 
     if (task === 'analyzeLogo') {
+      const profile = languageProfile(input.language);
       const image = stripDataUrl(input.image);
       const response = await client.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: [
-          { text: 'این لوگو را مثل طراح برند و کارشناس چاپ تحلیل کن: سبک بصری، رنگ، خوانایی در ابعاد کوچک، قابلیت چاپ روی هودی/ماگ/تیشرت، ریسک‌های چاپی و پیشنهاد اصلاحی. پاسخ فارسی و کاربردی باشد.' },
+          { text: `Analyze this logo like a brand designer and print-production expert. Cover visual style, color, small-size legibility, printing on hoodies/mugs/t-shirts, print risks, and practical improvements. Respond in ${profile.visible} and adapt to ${profile.culture}.` },
           { inlineData: { mimeType: image.mimeType, data: image.data } },
         ],
       });
@@ -659,7 +828,8 @@ exports.generateAiContent = onCall({ region: REGION, secrets: [geminiApiKey], ti
     }
 
     if (task === 'businessCard') {
-      const prompt = `برای کارت ویزیت چاپی یک شعار کوتاه و یک توضیح یک‌خطی فارسی بساز. نام کسب‌وکار: "${text(input.businessName, 120)}". توضیح: "${text(input.description, 500)}". فقط JSON بده: { "slogan": "...", "description": "..." }`;
+      const profile = languageProfile(input.language);
+      const prompt = `Create a short slogan and one-line description in ${profile.visible} for a printed business card. Business: "${text(input.businessName, 120)}". Description: "${text(input.description, 500)}". Adapt to ${profile.culture}. Return only JSON: { "slogan": "...", "description": "..." }`;
       const response = await client.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: prompt,
@@ -673,7 +843,8 @@ exports.generateAiContent = onCall({ region: REGION, secrets: [geminiApiKey], ti
     }
 
     if (task === 'menuItems') {
-      const prompt = `برای منوی چاپی یک "${text(input.businessType, 120)}" پنج آیتم محبوب و واقعی پیشنهاد بده. هر آیتم فارسی، خوانا و مناسب چاپ باشد. قیمت با فرمت تومان مثل "۱۵۰,۰۰۰ ت". فقط JSON array بده: [{ "name": "...", "price": "...", "description": "..." }]`;
+      const profile = languageProfile(input.language);
+      const prompt = `Suggest five realistic popular menu items in ${profile.visible} for a printed menu for "${text(input.businessType, 120)}". Make names readable, culturally suitable for ${profile.culture}, and print-friendly. Use EUR prices unless the brief implies another currency. Return only JSON array: [{ "name": "...", "price": "...", "description": "..." }]`;
       const response = await client.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: prompt,
@@ -691,18 +862,20 @@ exports.generateAiContent = onCall({ region: REGION, secrets: [geminiApiKey], ti
     }
 
     if (task === 'backgroundImage') {
+      const profile = languageProfile(input.language);
       const image = await generateImageDataUrl(
         client,
-        `Create a high-quality print-design background. Theme: ${text(input.prompt, 500)}. Must support readable Persian text overlay, calm negative space, CMYK-friendly colors, no busy details behind text, premium commercial look.`,
+        `Create a high-quality print-design background. Theme: ${text(input.prompt, 500)}. Must support readable ${profile.visible} text overlay, calm negative space, CMYK-friendly colors, no busy details behind text, premium commercial look adapted to ${profile.culture}.`,
         ['1:1', '9:16', '16:9'].includes(input.aspectRatio) ? input.aspectRatio : '9:16'
       );
       return completeAiUsage(reservation, { image });
     }
 
     if (task === 'logo') {
+      const profile = languageProfile(input.language);
       const image = await generateImageDataUrl(
         client,
-        `A professional, minimalist, vector-like logo for a business named "${text(input.businessName, 120)}" in the ${text(input.industry, 120)} industry. Scalable, iconic, high contrast, suitable for print, signage, stamp, embroidery, packaging and social media. White background, centered, premium brand identity.`,
+        `A professional, minimalist, vector-like logo for a business named "${text(input.businessName, 120)}" in the ${text(input.industry, 120)} industry. Scalable, iconic, high contrast, suitable for print, signage, stamp, embroidery, packaging and social media. White background, centered, premium brand identity adapted to ${profile.culture}.`,
         '1:1'
       );
       return completeAiUsage(reservation, { image });
@@ -736,7 +909,79 @@ function stripeClient() {
   return new Stripe(stripeSecretKey.value());
 }
 
+function localizedCreditPackName(language, credits) {
+  const base = CREDIT_PACK_NAMES[language] || CREDIT_PACK_NAMES.en;
+  return `${base} - ${credits}`;
+}
+
+async function markCreditCheckoutPaid(session) {
+  const creditIntentId = session.metadata && session.metadata.creditIntentId;
+  if (!creditIntentId || session.payment_status === 'unpaid') return false;
+
+  const creditRef = db.collection('creditCheckoutIntents').doc(creditIntentId);
+  const txRef = db.collection('aiCreditTransactions').doc(creditIntentId);
+  let recorded = false;
+
+  await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(creditRef);
+    if (!snapshot.exists) {
+      logger.warn('Paid credit Checkout Session did not match an intent.', { creditIntentId, sessionId: session.id });
+      return;
+    }
+    const intent = snapshot.data();
+    if (intent.paymentStatus === 'paid') {
+      recorded = true;
+      return;
+    }
+
+    const credits = Math.floor(safeNumber(intent.credits, 0));
+    const userRef = db.collection('users').doc(intent.userId);
+    const userSnapshot = await transaction.get(userRef);
+    const userData = userSnapshot.exists ? userSnapshot.data() : {};
+    transaction.set(userRef, {
+      uid: intent.userId,
+      email: intent.userEmail || null,
+      customerCode: intent.customerCode || customerCodeFromUid(intent.userId),
+      aiCreditsBalance: Math.floor(safeNumber(userData.aiCreditsBalance, 0)) + credits,
+      aiCreditsPurchased: Math.floor(safeNumber(userData.aiCreditsPurchased, 0)) + credits,
+      aiCreditsTotalGranted: Math.floor(safeNumber(userData.aiCreditsTotalGranted, 0)) + credits,
+      aiLastPurchaseAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+      ...(userSnapshot.exists ? {} : { role: 'customer', status: 'active', createdAt: FieldValue.serverTimestamp() }),
+    }, { merge: true });
+    transaction.set(creditRef, {
+      paymentStatus: 'paid',
+      status: 'paid',
+      stripeCheckoutSessionId: session.id,
+      stripePaymentIntentId: typeof session.payment_intent === 'string' ? session.payment_intent : null,
+      amountTotalCents: session.amount_total || intent.amountTotalCents,
+      currency: (session.currency || 'eur').toUpperCase(),
+      paidAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+    transaction.set(txRef, {
+      type: 'purchase',
+      userId: intent.userId,
+      userEmail: intent.userEmail || null,
+      customerCode: intent.customerCode || null,
+      credits,
+      packId: intent.packId,
+      amountTotalCents: session.amount_total || intent.amountTotalCents,
+      currency: (session.currency || 'eur').toUpperCase(),
+      stripeCheckoutSessionId: session.id,
+      createdAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+    recorded = true;
+  });
+
+  return recorded;
+}
+
 async function markCheckoutPaid(session) {
+  if (session.metadata && session.metadata.type === 'ai_credit') {
+    return markCreditCheckoutPaid(session);
+  }
+
   const orderId = session.metadata && session.metadata.orderId;
   if (!orderId || session.payment_status === 'unpaid') return false;
 
@@ -793,6 +1038,17 @@ async function markCheckoutPaid(session) {
 }
 
 async function markCheckoutFailed(session) {
+  if (session.metadata && session.metadata.type === 'ai_credit') {
+    const creditIntentId = session.metadata.creditIntentId;
+    if (!creditIntentId) return;
+    await db.collection('creditCheckoutIntents').doc(creditIntentId).set({
+      paymentStatus: 'failed',
+      status: 'cancelled',
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+    return;
+  }
+
   const orderId = session.metadata && session.metadata.orderId;
   if (!orderId) return;
   const orderRef = db.collection('checkoutIntents').doc(orderId);
@@ -934,6 +1190,97 @@ exports.createCheckoutSession = onCall({ region: REGION, secrets: [stripeSecretK
   }
 });
 
+exports.createCreditCheckoutSession = onCall({ region: REGION, secrets: [stripeSecretKey] }, async (request) => {
+  if (!request.auth) {
+    throw new HttpsError('unauthenticated', 'Sign in before buying credits.');
+  }
+
+  const input = request.data || {};
+  const packId = text(input.packId, 40);
+  const pack = CREDIT_PACKS[packId];
+  if (!pack) throw new HttpsError('invalid-argument', 'Unknown credit pack.');
+
+  const returnOrigin = safeReturnOrigin(input.returnUrl);
+  const language = checkoutLanguage(input.language);
+  const uid = request.auth.uid;
+  const userEmail = text(request.auth.token.email, 200).toLowerCase() || null;
+  const customerCode = customerCodeFromUid(uid);
+  const intentRef = db.collection('creditCheckoutIntents').doc();
+  const purchaseNumber = `AIC-${intentRef.id.slice(0, 8).toUpperCase()}`;
+
+  await intentRef.set({
+    purchaseNumber,
+    userId: uid,
+    userEmail,
+    customerCode,
+    packId,
+    credits: pack.credits,
+    amountTotalCents: pack.amountCents,
+    currency: 'EUR',
+    language,
+    status: 'awaiting_payment',
+    paymentStatus: 'unpaid',
+    paymentMethod: 'stripe',
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+
+  await db.collection('users').doc(uid).set({
+    uid,
+    email: userEmail,
+    customerCode,
+    language,
+    updatedAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  try {
+    const checkout = await stripeClient().checkout.sessions.create({
+      mode: 'payment',
+      payment_method_types: ['card'],
+      client_reference_id: intentRef.id,
+      customer_email: userEmail || undefined,
+      locale: STRIPE_LOCALES[language],
+      line_items: [{
+        quantity: 1,
+        price_data: {
+          currency: 'eur',
+          unit_amount: pack.amountCents,
+          product_data: {
+            name: localizedCreditPackName(language, pack.credits),
+            metadata: { purchaseNumber, type: 'ai_credit', credits: String(pack.credits) },
+          },
+        },
+      }],
+      metadata: {
+        type: 'ai_credit',
+        creditIntentId: intentRef.id,
+        purchaseNumber,
+        userId: uid,
+        customerCode,
+        packId,
+        credits: String(pack.credits),
+        language,
+      },
+      success_url: `${returnOrigin}/?payment=success&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${returnOrigin}/?payment=cancelled`,
+    });
+
+    await intentRef.update({
+      stripeCheckoutSessionId: checkout.id,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    return { url: checkout.url, creditIntentId: intentRef.id, purchaseNumber, credits: pack.credits };
+  } catch (error) {
+    logger.error('Stripe credit Checkout Session creation failed.', error);
+    await intentRef.update({
+      status: 'cancelled',
+      paymentStatus: 'failed',
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    throw new HttpsError('internal', 'Could not open Stripe Checkout.');
+  }
+});
+
 exports.getCheckoutStatus = onCall({ region: REGION, secrets: [stripeSecretKey] }, async (request) => {
   if (!request.auth) {
     throw new HttpsError('unauthenticated', 'Sign in to verify checkout.');
@@ -945,6 +1292,17 @@ exports.getCheckoutStatus = onCall({ region: REGION, secrets: [stripeSecretKey] 
   if (!session.metadata || session.metadata.userId !== request.auth.uid) {
     throw new HttpsError('permission-denied', 'This checkout does not belong to the signed-in customer.');
   }
+
+  if (session.metadata.type === 'ai_credit') {
+    const paid = await markCreditCheckoutPaid(session);
+    return {
+      paid: paid && session.payment_status !== 'unpaid',
+      type: 'ai_credit',
+      creditsAdded: Math.floor(safeNumber(session.metadata.credits, 0)),
+      customerCode: session.metadata.customerCode || null,
+    };
+  }
+
   const paid = await markCheckoutPaid(session);
   const snapshot = await db.collection('orders').doc(session.metadata.orderId).get();
   return {

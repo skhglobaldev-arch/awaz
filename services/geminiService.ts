@@ -1,6 +1,8 @@
 import { httpsCallable } from 'firebase/functions';
 import { functions } from '../firebase';
 import { MenuItem, CategoryId, Template } from '../types';
+import { Language } from '../translations';
+import { getAiDeviceId } from './creditService';
 
 type AiTask =
   | 'description'
@@ -21,25 +23,9 @@ export interface AiUsage {
   plan: string;
 }
 
-const AI_DEVICE_KEY = 'awaz_ai_device_id';
 let lastAiErrorMessage = '';
 
 export const getLastAiErrorMessage = () => lastAiErrorMessage;
-
-const getAiDeviceId = () => {
-  try {
-    const saved = localStorage.getItem(AI_DEVICE_KEY);
-    if (saved) return saved;
-    const browserCrypto = globalThis.crypto;
-    const id = browserCrypto?.randomUUID
-      ? browserCrypto.randomUUID()
-      : `device-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    localStorage.setItem(AI_DEVICE_KEY, id);
-    return id;
-  } catch (_) {
-    return `device-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  }
-};
 
 const readableAiError = (error: unknown) => {
   const err = error as { code?: string; message?: string };
@@ -67,9 +53,9 @@ const callAi = async <T extends Record<string, unknown>>(task: AiTask, payload: 
   return result.data;
 };
 
-export const generateDescription = async (itemName: string, categoryName: string): Promise<string> => {
+export const generateDescription = async (itemName: string, categoryName: string, language: Language = 'fa'): Promise<string> => {
   try {
-    const result = await callAi<{ text?: string }>('description', { itemName, categoryName });
+    const result = await callAi<{ text?: string }>('description', { itemName, categoryName, language });
     return result.text || 'توضیحات یافت نشد.';
   } catch (error) {
     console.error('AI description generation failed:', error);
@@ -77,9 +63,9 @@ export const generateDescription = async (itemName: string, categoryName: string
   }
 };
 
-export const analyzeLogoDesign = async (base64Image: string): Promise<string> => {
+export const analyzeLogoDesign = async (base64Image: string, language: Language = 'fa'): Promise<string> => {
   try {
-    const result = await callAi<{ text?: string }>('analyzeLogo', { image: base64Image });
+    const result = await callAi<{ text?: string }>('analyzeLogo', { image: base64Image, language });
     return result.text || 'تحلیل تصویر انجام نشد.';
   } catch (error) {
     console.error('AI logo analysis failed:', error);
@@ -89,10 +75,11 @@ export const analyzeLogoDesign = async (base64Image: string): Promise<string> =>
 
 export const generateBusinessCardContent = async (
   businessName: string,
-  description: string
+  description: string,
+  language: Language = 'fa'
 ): Promise<{ slogan: string; description: string }> => {
   try {
-    const result = await callAi<{ slogan?: string; description?: string }>('businessCard', { businessName, description });
+    const result = await callAi<{ slogan?: string; description?: string }>('businessCard', { businessName, description, language });
     return {
       slogan: result.slogan || 'خلاقیت در هر قدم',
       description: result.description || 'همراه شما در مسیر موفقیت',
@@ -106,10 +93,11 @@ export const generateBusinessCardContent = async (
 
 export const generateBackgroundImage = async (
   prompt: string,
-  aspectRatio: '1:1' | '9:16' | '16:9' = '9:16'
+  aspectRatio: '1:1' | '9:16' | '16:9' = '9:16',
+  language: Language = 'fa'
 ): Promise<string | null> => {
   try {
-    const result = await callAi<{ image?: string | null }>('backgroundImage', { prompt, aspectRatio });
+    const result = await callAi<{ image?: string | null }>('backgroundImage', { prompt, aspectRatio, language });
     return result.image || null;
   } catch (error) {
     console.error('AI background image generation failed:', error);
@@ -118,9 +106,9 @@ export const generateBackgroundImage = async (
   }
 };
 
-export const generateLogo = async (businessName: string, industry: string): Promise<string | null> => {
+export const generateLogo = async (businessName: string, industry: string, language: Language = 'fa'): Promise<string | null> => {
   try {
-    const result = await callAi<{ image?: string | null }>('logo', { businessName, industry });
+    const result = await callAi<{ image?: string | null }>('logo', { businessName, industry, language });
     return result.image || null;
   } catch (error) {
     console.error('AI logo generation failed:', error);
@@ -129,9 +117,9 @@ export const generateLogo = async (businessName: string, industry: string): Prom
   }
 };
 
-export const suggestMenuItems = async (businessType: string): Promise<MenuItem[]> => {
+export const suggestMenuItems = async (businessType: string, language: Language = 'fa'): Promise<MenuItem[]> => {
   try {
-    const result = await callAi<{ items?: MenuItem[] }>('menuItems', { businessType });
+    const result = await callAi<{ items?: MenuItem[] }>('menuItems', { businessType, language });
     return (result.items || []).map((item, index) => ({
       id: item.id || `ai-${index}-${Date.now()}`,
       name: item.name || 'آیتم پیشنهادی',
@@ -151,7 +139,8 @@ export const generateTemplate = async (
   businessName?: string,
   industry?: string,
   subIndustry?: string,
-  itemType?: string
+  itemType?: string,
+  language: Language = 'fa'
 ): Promise<Template | null> => {
   try {
     const result = await callAi<{ template?: Template | null }>('template', {
@@ -161,6 +150,7 @@ export const generateTemplate = async (
       industry,
       subIndustry,
       itemType,
+      language,
     });
     return result.template || null;
   } catch (error) {

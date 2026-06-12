@@ -7,6 +7,8 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useLanguage } from '../LanguageContext';
+import { auth } from '../firebase';
+import { chargeDesignDownload } from '../services/creditService';
 
 interface MockupGeneratorProps {
   onBack: () => void;
@@ -15,6 +17,7 @@ interface MockupGeneratorProps {
 
 export const MockupGenerator: React.FC<MockupGeneratorProps> = ({ onBack, onOrder }) => {
   const { t, isRtl } = useLanguage();
+  const creditText = (cost: number) => `${cost} ${t('ai_credit_unit')}`;
   
   const PRODUCTS = [
     {
@@ -154,6 +157,10 @@ export const MockupGenerator: React.FC<MockupGeneratorProps> = ({ onBack, onOrde
 
   const handleDownload = async () => {
     if (!previewRef.current) return;
+    if (!auth.currentUser) {
+      alert(t('editor_msg_login_required'));
+      return;
+    }
     // @ts-ignore
     if (typeof window.html2canvas === 'undefined') {
       alert(t('mockup_label_rendering'));
@@ -169,12 +176,14 @@ export const MockupGenerator: React.FC<MockupGeneratorProps> = ({ onBack, onOrde
         backgroundColor: null,
         logging: false
       });
+      await chargeDesignDownload({ source: 'mockup', designId: selectedProduct.id, categoryId: 'merch' });
       const link = document.createElement("a");
       link.download = `awaz-mockup-${selectedProduct.id}-${Date.now()}.png`;
       link.href = canvas.toDataURL("image/png");
       link.click();
     } catch (err) {
       console.error(err);
+      alert(t('ai_credit_download_error'));
     } finally {
       setIsProcessing(false);
     }
@@ -560,7 +569,7 @@ export const MockupGenerator: React.FC<MockupGeneratorProps> = ({ onBack, onOrde
                 className="w-full bg-white text-slate-700 border border-slate-200 py-4 rounded-2xl font-black text-xs flex items-center justify-center gap-2 hover:bg-slate-50 transition-all disabled:opacity-50 active:scale-95"
               >
                 {isProcessing ? <RotateCw className="animate-spin" size={18}/> : <Download size={18} className="text-blue-600"/>}
-                {t('mockup_label_download')}
+                {t('mockup_label_download')} - {creditText(2)}
               </button>
             </>
           )}
@@ -890,4 +899,3 @@ export const MockupGenerator: React.FC<MockupGeneratorProps> = ({ onBack, onOrde
     </div>
   );
 };
-

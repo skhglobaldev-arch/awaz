@@ -39,7 +39,7 @@ const App: React.FC = () => {
   const { favorites, toggleFavorite, isFavorite } = useFavorites();
   const [hasApiKey, setHasApiKey] = useState(true);
   const [showTemplatesOnLoad, setShowTemplatesOnLoad] = useState(false);
-  const [paymentResult, setPaymentResult] = useState<{ checking: boolean; paid?: boolean; orderId?: string; customerCode?: string; error?: string }>({ checking: false });
+  const [paymentResult, setPaymentResult] = useState<{ checking: boolean; paid?: boolean; type?: string; orderId?: string; customerCode?: string; creditsAdded?: number; error?: string }>({ checking: false });
   const { t, isRtl, language } = useLanguage();
 
   useEffect(() => {
@@ -72,7 +72,7 @@ const App: React.FC = () => {
       setPaymentResult({ checking: true });
       try {
         await auth.authStateReady();
-        const getCheckoutStatus = httpsCallable<{ sessionId: string }, { paid: boolean; orderId?: string; customerCode?: string }>(functions, 'getCheckoutStatus');
+        const getCheckoutStatus = httpsCallable<{ sessionId: string }, { paid: boolean; type?: string; orderId?: string; customerCode?: string; creditsAdded?: number }>(functions, 'getCheckoutStatus');
         const result = await getCheckoutStatus({ sessionId: view.sessionId });
         setPaymentResult({ checking: false, ...result.data });
       } catch (error) {
@@ -497,7 +497,11 @@ const App: React.FC = () => {
             ) : paymentResult.paid ? (
               <>
                 <h1 className="text-4xl font-black text-slate-900">{isRtl ? 'پرداخت موفق بود' : 'Payment successful'}</h1>
-                <p className="text-slate-500 text-lg">{isRtl ? 'سفارش شما ثبت شد و در داشبورد قابل پیگیری است.' : 'Your order has been recorded and is now trackable in your dashboard.'}</p>
+                <p className="text-slate-500 text-lg">
+                  {paymentResult.type === 'ai_credit'
+                    ? (isRtl ? `${paymentResult.creditsAdded || 0} اعتبار به حساب شما اضافه شد.` : `${paymentResult.creditsAdded || 0} credits were added to your account.`)
+                    : (isRtl ? 'سفارش شما ثبت شد و در داشبورد قابل پیگیری است.' : 'Your order has been recorded and is now trackable in your dashboard.')}
+                </p>
                 {paymentResult.customerCode && <p className="rounded-xl bg-slate-50 p-4 font-bold text-slate-700">{isRtl ? 'کد مشتری:' : 'Customer code:'} {paymentResult.customerCode}</p>}
               </>
             ) : (
@@ -507,7 +511,7 @@ const App: React.FC = () => {
               </>
             )}
             <button onClick={goToDashboard} className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black text-lg hover:bg-slate-800 transition-all">
-              {isRtl ? 'مشاهده داشبورد سفارش ها' : 'View order dashboard'}
+              {isRtl ? 'مشاهده داشبورد' : 'View dashboard'}
             </button>
           </div>
         </div>
