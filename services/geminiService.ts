@@ -11,9 +11,59 @@ type AiTask =
   | 'menuItems'
   | 'template';
 
-const callAi = async <T>(task: AiTask, payload: Record<string, unknown>): Promise<T> => {
-  const generateAiContent = httpsCallable<Record<string, unknown>, T>(functions, 'generateAiContent');
-  const result = await generateAiContent({ task, ...payload });
+export interface AiUsage {
+  cost: number;
+  creditsRemaining: number;
+  dailyCreditsUsed: number;
+  dailyCreditLimit: number;
+  dailyImagesUsed: number;
+  dailyImageLimit: number;
+  plan: string;
+}
+
+const AI_DEVICE_KEY = 'awaz_ai_device_id';
+let lastAiErrorMessage = '';
+
+export const getLastAiErrorMessage = () => lastAiErrorMessage;
+
+const getAiDeviceId = () => {
+  try {
+    const saved = localStorage.getItem(AI_DEVICE_KEY);
+    if (saved) return saved;
+    const browserCrypto = globalThis.crypto;
+    const id = browserCrypto?.randomUUID
+      ? browserCrypto.randomUUID()
+      : `device-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    localStorage.setItem(AI_DEVICE_KEY, id);
+    return id;
+  } catch (_) {
+    return `device-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+};
+
+const readableAiError = (error: unknown) => {
+  const err = error as { code?: string; message?: string };
+  const code = err?.code || '';
+  const message = err?.message || '';
+  if (code.includes('unauthenticated')) return 'برای استفاده از هوش مصنوعی، ابتدا وارد حساب کاربری شوید.';
+  if (code.includes('resource-exhausted') || /credit|limit/i.test(message)) {
+    return 'اعتبار یا محدودیت روزانه هوش مصنوعی تمام شده است. بعدا دوباره امتحان کنید یا اعتبار بیشتری تهیه کنید.';
+  }
+  return 'خطا در تولید محتوا توسط هوش مصنوعی.';
+};
+
+const rememberAiError = (error: unknown) => {
+  lastAiErrorMessage = readableAiError(error);
+  return lastAiErrorMessage;
+};
+
+const callAi = async <T extends Record<string, unknown>>(task: AiTask, payload: Record<string, unknown>): Promise<T> => {
+  lastAiErrorMessage = '';
+  const generateAiContent = httpsCallable<Record<string, unknown>, T & { aiUsage?: AiUsage }>(functions, 'generateAiContent');
+  const result = await generateAiContent({ task, deviceId: getAiDeviceId(), ...payload });
+  if (result.data?.aiUsage && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('awaz:ai-usage-updated', { detail: result.data.aiUsage }));
+  }
   return result.data;
 };
 
@@ -23,7 +73,7 @@ export const generateDescription = async (itemName: string, categoryName: string
     return result.text || 'توضیحات یافت نشد.';
   } catch (error) {
     console.error('AI description generation failed:', error);
-    return 'برای دریافت توضیحات هوشمند، ابتدا وارد حساب کاربری شوید.';
+    return rememberAiError(error);
   }
 };
 
@@ -33,7 +83,7 @@ export const analyzeLogoDesign = async (base64Image: string): Promise<string> =>
     return result.text || 'تحلیل تصویر انجام نشد.';
   } catch (error) {
     console.error('AI logo analysis failed:', error);
-    return 'برای تحلیل هوشمند لوگو، ابتدا وارد حساب کاربری شوید.';
+    return rememberAiError(error);
   }
 };
 
@@ -49,6 +99,7 @@ export const generateBusinessCardContent = async (
     };
   } catch (error) {
     console.error('AI business card content generation failed:', error);
+    rememberAiError(error);
     return { slogan: 'خلاقیت در هر قدم', description: 'همراه شما در مسیر موفقیت' };
   }
 };
@@ -62,6 +113,7 @@ export const generateBackgroundImage = async (
     return result.image || null;
   } catch (error) {
     console.error('AI background image generation failed:', error);
+    rememberAiError(error);
     return null;
   }
 };
@@ -72,6 +124,7 @@ export const generateLogo = async (businessName: string, industry: string): Prom
     return result.image || null;
   } catch (error) {
     console.error('AI logo generation failed:', error);
+    rememberAiError(error);
     return null;
   }
 };
@@ -87,6 +140,7 @@ export const suggestMenuItems = async (businessType: string): Promise<MenuItem[]
     }));
   } catch (error) {
     console.error('AI menu item suggestion failed:', error);
+    rememberAiError(error);
     return [];
   }
 };
@@ -111,6 +165,7 @@ export const generateTemplate = async (
     return result.template || null;
   } catch (error) {
     console.error('AI template generation failed:', error);
+    rememberAiError(error);
     return null;
   }
 };

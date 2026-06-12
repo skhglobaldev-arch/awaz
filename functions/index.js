@@ -3,6 +3,7 @@ const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { logger } = require('firebase-functions');
 const { defineSecret } = require('firebase-functions/params');
 const { HttpsError, onCall, onRequest } = require('firebase-functions/v2/https');
+const crypto = require('crypto');
 const Stripe = require('stripe');
 
 const adminApp = initializeApp();
@@ -13,6 +14,27 @@ const db = getFirestore(adminApp, DATABASE_ID);
 const stripeSecretKey = defineSecret('STRIPE_SECRET_KEY');
 const stripeWebhookSecret = defineSecret('STRIPE_WEBHOOK_SECRET');
 const geminiApiKey = defineSecret('GEMINI_API_KEY');
+
+const AI_FREE_GRANT_VERSION = 1;
+const AI_FREE_CREDITS = 10;
+const AI_ACCOUNT_LIMIT_PER_SIGNAL = 2;
+const AI_TASK_COST = {
+  description: 1,
+  analyzeLogo: 1,
+  businessCard: 1,
+  menuItems: 1,
+  template: 1,
+  backgroundImage: 5,
+  logo: 5,
+};
+const AI_IMAGE_TASKS = new Set(['backgroundImage', 'logo']);
+const AI_PLAN_LIMITS = {
+  free: { dailyCredits: 5, dailyImages: 2 },
+  starter: { dailyCredits: 40, dailyImages: 8 },
+  pro: { dailyCredits: 120, dailyImages: 25 },
+  business: { dailyCredits: 400, dailyImages: 80 },
+  admin: { dailyCredits: 1000, dailyImages: 200 },
+};
 
 const UNIT_PRICE_CENTS = {
   retail: 4,
@@ -99,6 +121,264 @@ function safeReturnOrigin(value) {
 function safeNumber(value, fallback = 0) {
   const result = Number(value);
   return Number.isFinite(result) ? result : fallback;
+}
+
+function todayKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function hashSignal(value) {
+  const input = text(value, 240);
+  return input ? crypto.createHash('sha256').update(input).digest('hex').slice(0, 32) : null;
+}
+
+function clientIpFromRequest(request) {
+  const headers = request.rawRequest && request.rawRequest.headers || {};
+  const forwarded = headers['x-forwarded-for'] || headers['fastly-client-ip'] || headers['cf-connecting-ip'] || '';
+  const value = Array.isArray(forwarded) ? forwarded[0] : String(forwarded);
+  return text(value.split(',')[0], 80) || text(request.rawRequest && request.rawRequest.ip, 80);
+}
+
+function aiPlan(userData, authToken) {
+  const email = text(authToken.email, 200).toLowerCase();
+  if (userData.role === 'admin' || email === 'adminawaz@gmail.com' || email === 'awarvandsara@gmail.com') {
+    return 'admin';
+  }
+  const plan = text(userData.aiPlan, 40).toLowerCase() || 'free';
+  return AI_PLAN_LIMITS[plan] ? plan : 'free';
+}
+
+function aiLimits(userData, plan) {
+  const base = AI_PLAN_LIMITS[plan] || AI_PLAN_LIMITS.free;
+  return {
+    dailyCredits: Math.max(1, Math.floor(safeNumber(userData.aiDailyCreditLimit, base.dailyCredits))),
+    dailyImages: Math.max(0, Math.floor(safeNumber(userData.aiDailyImageLimit, base.dailyImages))),
+  };
+}
+
+function signalBlocked(snapshot, uid) {
+  if (!snapshot || !snapshot.exists) return false;
+  const accounts = Array.isArray(snapshot.data().accounts) ? snapshot.data().accounts : [];
+  return !accounts.includes(uid) && accounts.length >= AI_ACCOUNT_LIMIT_PER_SIGNAL;
+}
+
+function nextSignalAccounts(snapshot, uid) {
+  const accounts = snapshot && snapshot.exists && Array.isArray(snapshot.data().accounts) ? snapshot.data().accounts : [];
+  return accounts.includes(uid) ? accounts : [...accounts, uid].slice(0, 25);
+}
+
+async function reserveAiCredits(request, task, input) {
+  const cost = AI_TASK_COST[task];
+  if (!cost) throw new HttpsError('invalid-argument', 'Unknown AI task.');
+
+  const uid = request.auth.uid;
+  const authToken = request.auth.token || {};
+  const email = text(authToken.email, 200).toLowerCase() || null;
+  const userRef = db.collection('users').doc(uid);
+  const dailyRef = userRef.collection('aiUsageDaily').doc(todayKey());
+  const usageRef = db.collection('aiUsage').doc();
+  const deviceHash = hashSignal(input.deviceId);
+  const ipHash = hashSignal(clientIpFromRequest(request));
+  const deviceRef = deviceHash ? db.collection('aiAbuseKeys').doc(`device_${deviceHash}`) : null;
+  const ipRef = ipHash ? db.collection('aiAbuseKeys').doc(`ip_${ipHash}`) : null;
+  const isImageTask = AI_IMAGE_TASKS.has(task);
+  let reservation = null;
+
+  await db.runTransaction(async (transaction) => {
+    const userSnapshot = await transaction.get(userRef);
+    const dailySnapshot = await transaction.get(dailyRef);
+    const deviceSnapshot = deviceRef ? await transaction.get(deviceRef) : null;
+    const ipSnapshot = ipRef ? await transaction.get(ipRef) : null;
+
+    const userData = userSnapshot.exists ? userSnapshot.data() : {};
+    const plan = aiPlan(userData, authToken);
+    const limits = aiLimits(userData, plan);
+    let balance = Math.floor(safeNumber(userData.aiCreditsBalance, 0));
+    let totalGranted = Math.floor(safeNumber(userData.aiCreditsTotalGranted, 0));
+    const totalUsed = Math.floor(safeNumber(userData.aiCreditsTotalUsed, 0));
+    const freeAlreadyGranted = Number(userData.aiFreeGrantVersion || 0) >= AI_FREE_GRANT_VERSION;
+    const freeGrantBlocked = !freeAlreadyGranted && (signalBlocked(deviceSnapshot, uid) || signalBlocked(ipSnapshot, uid));
+
+    if (!freeAlreadyGranted && !freeGrantBlocked) {
+      balance += AI_FREE_CREDITS;
+      totalGranted += AI_FREE_CREDITS;
+    }
+    if (plan === 'admin' && balance < 1000) {
+      totalGranted += 1000 - balance;
+      balance = 1000;
+    }
+
+    if (freeGrantBlocked && balance < cost) {
+      transaction.set(userRef, {
+        uid,
+        email,
+        customerCode: customerCodeFromUid(uid),
+        aiPlan: plan === 'admin' ? 'admin' : text(userData.aiPlan, 40) || 'free',
+        aiFreeGrantBlocked: true,
+        aiFreeGrantBlockedAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      }, { merge: true });
+      throw new HttpsError('resource-exhausted', 'Free AI limit reached on this device or network.');
+    }
+
+    if (balance < cost) {
+      throw new HttpsError('resource-exhausted', 'Not enough AI credits.');
+    }
+
+    const dailyData = dailySnapshot.exists ? dailySnapshot.data() : {};
+    const dailyCreditsUsed = Math.floor(safeNumber(dailyData.creditsUsed, 0));
+    const dailyImagesUsed = Math.floor(safeNumber(dailyData.imageGenerations, 0));
+    if (dailyCreditsUsed + cost > limits.dailyCredits) {
+      throw new HttpsError('resource-exhausted', 'Daily AI credit limit reached.');
+    }
+    if (isImageTask && dailyImagesUsed + 1 > limits.dailyImages) {
+      throw new HttpsError('resource-exhausted', 'Daily AI image limit reached.');
+    }
+
+    balance -= cost;
+    const userUpdate = {
+      uid,
+      email,
+      customerCode: text(userData.customerCode, 30) || customerCodeFromUid(uid),
+      aiPlan: plan === 'admin' ? 'admin' : text(userData.aiPlan, 40) || 'free',
+      aiCreditsBalance: balance,
+      aiCreditsTotalGranted: totalGranted,
+      aiCreditsTotalUsed: totalUsed + cost,
+      aiLastTask: task,
+      aiLastUsedAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+      ...(freeAlreadyGranted ? {} : {
+        aiFreeGrantVersion: AI_FREE_GRANT_VERSION,
+        aiFreeCreditsGranted: freeGrantBlocked ? 0 : AI_FREE_CREDITS,
+        aiFreeGrantedAt: freeGrantBlocked ? null : FieldValue.serverTimestamp(),
+        aiFreeGrantBlocked: freeGrantBlocked,
+      }),
+      ...(userSnapshot.exists ? {} : { createdAt: FieldValue.serverTimestamp(), role: 'customer', status: 'active' }),
+    };
+    transaction.set(userRef, userUpdate, { merge: true });
+
+    transaction.set(dailyRef, {
+      date: todayKey(),
+      userId: uid,
+      creditsUsed: dailyCreditsUsed + cost,
+      imageGenerations: dailyImagesUsed + (isImageTask ? 1 : 0),
+      dailyCreditLimit: limits.dailyCredits,
+      dailyImageLimit: limits.dailyImages,
+      updatedAt: FieldValue.serverTimestamp(),
+      ...(dailySnapshot.exists ? {} : { createdAt: FieldValue.serverTimestamp() }),
+    }, { merge: true });
+
+    if (deviceRef) {
+      const accounts = nextSignalAccounts(deviceSnapshot, uid);
+      transaction.set(deviceRef, {
+        type: 'device',
+        hash: deviceHash,
+        accounts,
+        accountCount: accounts.length,
+        updatedAt: FieldValue.serverTimestamp(),
+        ...(deviceSnapshot && deviceSnapshot.exists ? {} : { createdAt: FieldValue.serverTimestamp() }),
+      }, { merge: true });
+    }
+    if (ipRef) {
+      const accounts = nextSignalAccounts(ipSnapshot, uid);
+      transaction.set(ipRef, {
+        type: 'ip',
+        hash: ipHash,
+        accounts,
+        accountCount: accounts.length,
+        updatedAt: FieldValue.serverTimestamp(),
+        ...(ipSnapshot && ipSnapshot.exists ? {} : { createdAt: FieldValue.serverTimestamp() }),
+      }, { merge: true });
+    }
+
+    const categoryId = text(input.initialCategoryId || input.categoryId, 80);
+    transaction.set(usageRef, {
+      userId: uid,
+      userEmail: email,
+      customerCode: customerCodeFromUid(uid),
+      task,
+      categoryId: categoryId || null,
+      cost,
+      plan,
+      isImageTask,
+      promptPreview: text(input.prompt || input.description || input.businessName || input.itemName, 240) || null,
+      status: 'reserved',
+      remainingCredits: balance,
+      dailyCreditsUsed: dailyCreditsUsed + cost,
+      dailyCreditLimit: limits.dailyCredits,
+      deviceHash: deviceHash || null,
+      ipHash: ipHash || null,
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    reservation = {
+      userRef,
+      dailyRef,
+      usageRef,
+      uid,
+      task,
+      cost,
+      isImageTask,
+      remainingCredits: balance,
+      dailyCreditsUsed: dailyCreditsUsed + cost,
+      dailyCreditLimit: limits.dailyCredits,
+      dailyImagesUsed: dailyImagesUsed + (isImageTask ? 1 : 0),
+      dailyImageLimit: limits.dailyImages,
+      plan,
+    };
+  });
+
+  return reservation;
+}
+
+async function completeAiUsage(reservation, data) {
+  await reservation.usageRef.update({
+    status: 'succeeded',
+    finishedAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+  return {
+    ...data,
+    aiUsage: {
+      cost: reservation.cost,
+      creditsRemaining: reservation.remainingCredits,
+      dailyCreditsUsed: reservation.dailyCreditsUsed,
+      dailyCreditLimit: reservation.dailyCreditLimit,
+      dailyImagesUsed: reservation.dailyImagesUsed,
+      dailyImageLimit: reservation.dailyImageLimit,
+      plan: reservation.plan,
+    },
+  };
+}
+
+async function refundAiCredits(reservation, error) {
+  if (!reservation) return;
+  await db.runTransaction(async (transaction) => {
+    const [userSnapshot, dailySnapshot] = await Promise.all([
+      transaction.get(reservation.userRef),
+      transaction.get(reservation.dailyRef),
+    ]);
+    const userData = userSnapshot.exists ? userSnapshot.data() : {};
+    const dailyData = dailySnapshot.exists ? dailySnapshot.data() : {};
+    transaction.set(reservation.userRef, {
+      aiCreditsBalance: Math.floor(safeNumber(userData.aiCreditsBalance, 0)) + reservation.cost,
+      aiCreditsTotalUsed: Math.max(0, Math.floor(safeNumber(userData.aiCreditsTotalUsed, 0)) - reservation.cost),
+      aiLastRefundAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+    transaction.set(reservation.dailyRef, {
+      creditsUsed: Math.max(0, Math.floor(safeNumber(dailyData.creditsUsed, 0)) - reservation.cost),
+      imageGenerations: Math.max(0, Math.floor(safeNumber(dailyData.imageGenerations, 0)) - (reservation.isImageTask ? 1 : 0)),
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+    transaction.set(reservation.usageRef, {
+      status: 'failed_refunded',
+      error: text(error && error.message, 500) || 'AI generation failed.',
+      refundedAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+  });
 }
 
 function safeMockup(input) {
@@ -351,92 +631,105 @@ exports.generateAiContent = onCall({ region: REGION, secrets: [geminiApiKey], ti
 
   const input = request.data || {};
   const task = text(input.task, 40);
-  const client = await geminiClient();
-
-  if (task === 'description') {
-    const prompt = `برای آیتم منوی "${text(input.itemName, 120)}" در دسته "${text(input.categoryName, 120)}" یک توضیح فارسی کوتاه، اشتهابرانگیز و قابل چاپ بنویس. حداکثر ۱۵ کلمه.`;
-    const response = await client.models.generateContent({ model: 'gemini-3-flash-preview', contents: prompt });
-    return { text: text(response.text, 500) || 'توضیحات یافت نشد.' };
+  if (!AI_TASK_COST[task]) {
+    throw new HttpsError('invalid-argument', 'Unknown AI task.');
   }
 
-  if (task === 'analyzeLogo') {
-    const image = stripDataUrl(input.image);
-    const response = await client.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: [
-        { text: 'این لوگو را مثل طراح برند و کارشناس چاپ تحلیل کن: سبک بصری، رنگ، خوانایی در ابعاد کوچک، قابلیت چاپ روی هودی/ماگ/تیشرت، ریسک‌های چاپی و پیشنهاد اصلاحی. پاسخ فارسی و کاربردی باشد.' },
-        { inlineData: { mimeType: image.mimeType, data: image.data } },
-      ],
-    });
-    return { text: text(response.text, 3000) || 'تحلیل تصویر انجام نشد.' };
-  }
+  const reservation = await reserveAiCredits(request, task, input);
+  let client;
+  try {
+    client = await geminiClient();
 
-  if (task === 'businessCard') {
-    const prompt = `برای کارت ویزیت چاپی یک شعار کوتاه و یک توضیح یک‌خطی فارسی بساز. نام کسب‌وکار: "${text(input.businessName, 120)}". توضیح: "${text(input.description, 500)}". فقط JSON بده: { "slogan": "...", "description": "..." }`;
-    const response = await client.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: prompt,
-      config: { responseMimeType: 'application/json' },
-    });
-    const result = parseJsonResponse(response.text, {});
-    return {
-      slogan: text(result.slogan, 120) || 'خلاقیت در هر قدم',
-      description: text(result.description, 220) || 'همراه شما در مسیر موفقیت',
-    };
-  }
+    if (task === 'description') {
+      const prompt = `برای آیتم منوی "${text(input.itemName, 120)}" در دسته "${text(input.categoryName, 120)}" یک توضیح فارسی کوتاه، اشتهابرانگیز و قابل چاپ بنویس. حداکثر ۱۵ کلمه.`;
+      const response = await client.models.generateContent({ model: 'gemini-3-flash-preview', contents: prompt });
+      return completeAiUsage(reservation, { text: text(response.text, 500) || 'توضیحات یافت نشد.' });
+    }
 
-  if (task === 'menuItems') {
-    const prompt = `برای منوی چاپی یک "${text(input.businessType, 120)}" پنج آیتم محبوب و واقعی پیشنهاد بده. هر آیتم فارسی، خوانا و مناسب چاپ باشد. قیمت با فرمت تومان مثل "۱۵۰,۰۰۰ ت". فقط JSON array بده: [{ "name": "...", "price": "...", "description": "..." }]`;
-    const response = await client.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: prompt,
-      config: { responseMimeType: 'application/json' },
-    });
-    const items = parseJsonResponse(response.text, []);
-    return {
-      items: Array.isArray(items) ? items.slice(0, 8).map((item, index) => ({
-        id: `ai-${index}-${Date.now()}`,
-        name: text(item.name, 100) || 'آیتم پیشنهادی',
-        price: text(item.price, 40),
-        description: text(item.description, 180),
-      })) : [],
-    };
-  }
+    if (task === 'analyzeLogo') {
+      const image = stripDataUrl(input.image);
+      const response = await client.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: [
+          { text: 'این لوگو را مثل طراح برند و کارشناس چاپ تحلیل کن: سبک بصری، رنگ، خوانایی در ابعاد کوچک، قابلیت چاپ روی هودی/ماگ/تیشرت، ریسک‌های چاپی و پیشنهاد اصلاحی. پاسخ فارسی و کاربردی باشد.' },
+          { inlineData: { mimeType: image.mimeType, data: image.data } },
+        ],
+      });
+      return completeAiUsage(reservation, { text: text(response.text, 3000) || 'تحلیل تصویر انجام نشد.' });
+    }
 
-  if (task === 'backgroundImage') {
-    const image = await generateImageDataUrl(
-      client,
-      `Create a high-quality print-design background. Theme: ${text(input.prompt, 500)}. Must support readable Persian text overlay, calm negative space, CMYK-friendly colors, no busy details behind text, premium commercial look.`,
-      ['1:1', '9:16', '16:9'].includes(input.aspectRatio) ? input.aspectRatio : '9:16'
-    );
-    return { image };
-  }
+    if (task === 'businessCard') {
+      const prompt = `برای کارت ویزیت چاپی یک شعار کوتاه و یک توضیح یک‌خطی فارسی بساز. نام کسب‌وکار: "${text(input.businessName, 120)}". توضیح: "${text(input.description, 500)}". فقط JSON بده: { "slogan": "...", "description": "..." }`;
+      const response = await client.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: prompt,
+        config: { responseMimeType: 'application/json' },
+      });
+      const result = parseJsonResponse(response.text, {});
+      return completeAiUsage(reservation, {
+        slogan: text(result.slogan, 120) || 'خلاقیت در هر قدم',
+        description: text(result.description, 220) || 'همراه شما در مسیر موفقیت',
+      });
+    }
 
-  if (task === 'logo') {
-    const image = await generateImageDataUrl(
-      client,
-      `A professional, minimalist, vector-like logo for a business named "${text(input.businessName, 120)}" in the ${text(input.industry, 120)} industry. Scalable, iconic, high contrast, suitable for print, signage, stamp, embroidery, packaging and social media. White background, centered, premium brand identity.`,
-      '1:1'
-    );
-    return { image };
-  }
+    if (task === 'menuItems') {
+      const prompt = `برای منوی چاپی یک "${text(input.businessType, 120)}" پنج آیتم محبوب و واقعی پیشنهاد بده. هر آیتم فارسی، خوانا و مناسب چاپ باشد. قیمت با فرمت تومان مثل "۱۵۰,۰۰۰ ت". فقط JSON array بده: [{ "name": "...", "price": "...", "description": "..." }]`;
+      const response = await client.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: prompt,
+        config: { responseMimeType: 'application/json' },
+      });
+      const items = parseJsonResponse(response.text, []);
+      return completeAiUsage(reservation, {
+        items: Array.isArray(items) ? items.slice(0, 8).map((item, index) => ({
+          id: `ai-${index}-${Date.now()}`,
+          name: text(item.name, 100) || 'آیتم پیشنهادی',
+          price: text(item.price, 40),
+          description: text(item.description, 180),
+        })) : [],
+      });
+    }
 
-  if (task === 'template') {
-    const categoryId = inferCategoryId(input);
-    const response = await client.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: `Create a print-ready professional template. User prompt: ${text(input.prompt, 2000)}`,
-      config: {
-        systemInstruction: buildPrintDesignStrategyPrompt(input, categoryId),
-        responseMimeType: 'application/json',
-      },
-    });
-    const parsed = parseJsonResponse(response.text, null);
-    const template = normalizeTemplate(parsed, input, categoryId);
-    return { template };
-  }
+    if (task === 'backgroundImage') {
+      const image = await generateImageDataUrl(
+        client,
+        `Create a high-quality print-design background. Theme: ${text(input.prompt, 500)}. Must support readable Persian text overlay, calm negative space, CMYK-friendly colors, no busy details behind text, premium commercial look.`,
+        ['1:1', '9:16', '16:9'].includes(input.aspectRatio) ? input.aspectRatio : '9:16'
+      );
+      return completeAiUsage(reservation, { image });
+    }
 
-  throw new HttpsError('invalid-argument', 'Unknown AI task.');
+    if (task === 'logo') {
+      const image = await generateImageDataUrl(
+        client,
+        `A professional, minimalist, vector-like logo for a business named "${text(input.businessName, 120)}" in the ${text(input.industry, 120)} industry. Scalable, iconic, high contrast, suitable for print, signage, stamp, embroidery, packaging and social media. White background, centered, premium brand identity.`,
+        '1:1'
+      );
+      return completeAiUsage(reservation, { image });
+    }
+
+    if (task === 'template') {
+      const categoryId = inferCategoryId(input);
+      const response = await client.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: `Create a print-ready professional template. User prompt: ${text(input.prompt, 2000)}`,
+        config: {
+          systemInstruction: buildPrintDesignStrategyPrompt(input, categoryId),
+          responseMimeType: 'application/json',
+        },
+      });
+      const parsed = parseJsonResponse(response.text, null);
+      const template = normalizeTemplate(parsed, input, categoryId);
+      return completeAiUsage(reservation, { template });
+    }
+
+    throw new HttpsError('invalid-argument', 'Unknown AI task.');
+  } catch (error) {
+    await refundAiCredits(reservation, error);
+    if (error instanceof HttpsError) throw error;
+    logger.error('AI generation failed; credits refunded.', { task, uid: request.auth.uid, error });
+    throw new HttpsError('internal', 'AI generation failed. Credits were refunded.');
+  }
 });
 
 function stripeClient() {

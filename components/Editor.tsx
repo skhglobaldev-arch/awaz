@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Template, MenuData, MenuItem, MenuSection } from '../types';
 import { FONT_OPTIONS } from '../constants';
 import { ArrowRight, Plus, Trash2, Download, Printer, Wand2, RefreshCw, ChevronDown, ChevronUp, Image as ImageIcon, Palette, Type, X, Upload, ZoomIn, ZoomOut, Maximize, FileText, Menu, Eye, PenTool, Sparkles, ImagePlus } from 'lucide-react';
-import { generateDescription, generateBusinessCardContent, generateBackgroundImage, suggestMenuItems, generateLogo } from '../services/geminiService';
+import { generateDescription, generateBusinessCardContent, generateBackgroundImage, suggestMenuItems, generateLogo, getLastAiErrorMessage } from '../services/geminiService';
 import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { db, auth } from '../firebase';
 import { useLanguage } from '../LanguageContext';
@@ -132,12 +132,14 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
   }, [pageSize]);
 
   // --- Auto Generation Handlers ---
+  const requireAiLogin = () => {
+    if (auth.currentUser) return true;
+    alert(t('editor_msg_login_required'));
+    return false;
+  };
+
   const handleAutoHeader = async () => {
-    const apiKey = (typeof process !== 'undefined' && process.env?.API_KEY) || (import.meta as any).env?.VITE_API_KEY;
-    if (!apiKey) {
-      alert(t('editor_msg_api_key_required'));
-      return;
-    }
+    if (!requireAiLogin()) return;
     setIsGeneratingHeader(true);
     const result = await generateBusinessCardContent(data.title, data.subtitle || "");
     setData(prev => ({
@@ -149,11 +151,7 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
   };
 
   const handleAutoBackground = async (theme: string) => {
-    const apiKey = (typeof process !== 'undefined' && process.env?.API_KEY) || (import.meta as any).env?.VITE_API_KEY;
-    if (!apiKey) {
-      alert(t('editor_msg_api_key_required'));
-      return;
-    }
+    if (!requireAiLogin()) return;
     if (!theme) return;
 
     setIsGeneratingBg(true);
@@ -162,15 +160,11 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
       if (bg) {
         setData(prev => ({ ...prev, backgroundImage: bg }));
       } else {
-        alert(t('editor_msg_generation_error'));
+        alert(getLastAiErrorMessage() || t('editor_msg_generation_error'));
       }
     } catch (error: any) {
       console.error("Gemini Image Generation Error:", error);
-      if (error.message?.includes('PERMISSION_DENIED')) {
-        alert(t('editor_msg_api_key_required'));
-      } else {
-        alert(t('editor_msg_generation_error'));
-      }
+      alert(getLastAiErrorMessage() || t('editor_msg_generation_error'));
     } finally {
       setIsGeneratingBg(false);
       setShowPromptModal(null);
@@ -179,11 +173,7 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
   };
 
   const handleAutoLogo = async () => {
-    const apiKey = (typeof process !== 'undefined' && process.env?.API_KEY) || (import.meta as any).env?.VITE_API_KEY;
-    if (!apiKey) {
-      alert(t('editor_msg_api_key_required'));
-      return;
-    }
+    if (!requireAiLogin()) return;
     if (!data.title) {
       alert(t('editor_msg_business_name_required'));
       return;
@@ -195,11 +185,11 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
       if (logo) {
         setData(prev => ({ ...prev, logo }));
       } else {
-        alert(t('editor_msg_generation_error'));
+        alert(getLastAiErrorMessage() || t('editor_msg_generation_error'));
       }
     } catch (error: any) {
       console.error("Gemini Logo Generation Error:", error);
-      alert(t('editor_msg_generation_error'));
+      alert(getLastAiErrorMessage() || t('editor_msg_generation_error'));
     } finally {
       setIsGeneratingLogo(false);
     }
@@ -214,12 +204,17 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
   };
 
   const handleAutoItems = async (sectionId: string) => {
+    if (!requireAiLogin()) return;
     setIsGenerating(sectionId);
     const items = await suggestMenuItems(data.title);
-    setData(prev => ({
-      ...prev,
-      sections: (prev.sections || []).map(s => s.id === sectionId ? { ...s, items: [...s.items, ...items] } : s)
-    }));
+    if (items.length) {
+      setData(prev => ({
+        ...prev,
+        sections: (prev.sections || []).map(s => s.id === sectionId ? { ...s, items: [...s.items, ...items] } : s)
+      }));
+    } else {
+      alert(getLastAiErrorMessage() || t('editor_msg_generation_error'));
+    }
     setIsGenerating(null);
   };
 
@@ -407,6 +402,7 @@ export const Editor: React.FC<EditorProps> = ({ template, onBack, onOrder }) => 
   };
 
   const handleAutoDescription = async (sectionId: string, itemId: string, name: string) => {
+    if (!requireAiLogin()) return;
     setIsGenerating(itemId);
     const desc = await generateDescription(name, template.categoryId);
     updateItem(sectionId, itemId, 'description', desc);

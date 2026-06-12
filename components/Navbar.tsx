@@ -1,10 +1,10 @@
 
 import React, { useState, useEffect } from 'react';
-import { Home, Palette, Shirt, LogIn, LogOut, Layout, Globe, ChevronDown, Shield } from 'lucide-react';
+import { Home, Palette, Shirt, LogIn, LogOut, Layout, Globe, ChevronDown, Shield, Sparkles } from 'lucide-react';
 import { Logo2 } from './Logo2';
 import { auth, db } from '../firebase';
 import { signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
-import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { doc, getDoc, onSnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
 import { useLanguage } from '../LanguageContext';
 import { Language } from '../translations';
 
@@ -49,6 +49,7 @@ const ensureCustomerProfile = async (user: FirebaseUser) => {
 export const Navbar: React.FC<NavbarProps> = ({ onNavigateHome, onNavigateMockup, onNavigateDashboard, onNavigateAdmin }) => {
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [aiCredits, setAiCredits] = useState<number | null>(null);
   const [isScrolled, setIsScrolled] = useState(false);
   const [isLangOpen, setIsLangOpen] = useState(false);
   const { language, setLanguage, t, isRtl } = useLanguage();
@@ -59,13 +60,20 @@ export const Navbar: React.FC<NavbarProps> = ({ onNavigateHome, onNavigateMockup
     };
     window.addEventListener('scroll', handleScroll);
     
+    let unsubscribeProfile = () => {};
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      unsubscribeProfile();
       setUser(user);
       setIsAdmin(false);
+      setAiCredits(null);
       if (!user) return;
 
       try {
         await ensureCustomerProfile(user);
+        unsubscribeProfile = onSnapshot(doc(db, 'users', user.uid), (snapshot) => {
+          const value = snapshot.data()?.aiCreditsBalance;
+          setAiCredits(typeof value === 'number' ? value : null);
+        });
         const email = normalizeEmail(user.email);
         const [adminByUid, adminByEmail, userDoc] = await Promise.all([
           getDoc(doc(db, 'admins', user.uid)),
@@ -86,6 +94,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onNavigateHome, onNavigateMockup
     return () => {
       window.removeEventListener('scroll', handleScroll);
       unsubscribe();
+      unsubscribeProfile();
     };
   }, []);
 
@@ -224,6 +233,10 @@ export const Navbar: React.FC<NavbarProps> = ({ onNavigateHome, onNavigateMockup
                     <Shield size={20} />
                   </button>
                 )}
+                <div className="hidden sm:flex items-center gap-1.5 rounded-xl border border-cyan-400/20 bg-cyan-400/10 px-3 py-2 text-xs font-black text-cyan-100">
+                  <Sparkles size={14} />
+                  <span>{aiCredits ?? '-'}</span>
+                </div>
                 <button 
                   onClick={onNavigateDashboard}
                   className="relative group flex items-center gap-3"

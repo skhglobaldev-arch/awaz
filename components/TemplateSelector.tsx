@@ -25,11 +25,11 @@ import {
 } from 'lucide-react';
 import { CategoryId, Template } from '../types';
 import { CATEGORIES, TEMPLATES } from '../constants';
-import { generateTemplate } from '../services/geminiService';
+import { generateTemplate, getLastAiErrorMessage } from '../services/geminiService';
 import { useLanguage } from '../LanguageContext';
 import { db, auth } from '../firebase';
 import { onAuthStateChanged } from 'firebase/auth';
-import { collection, onSnapshot, query } from 'firebase/firestore';
+import { collection, doc, onSnapshot, query } from 'firebase/firestore';
 
 enum OperationType {
   CREATE = 'create',
@@ -106,6 +106,7 @@ export const TemplateSelector: React.FC<TemplateSelectorProps> = ({
   const [generationStep, setGenerationStep] = useState(1);
   const [showTour, setShowTour] = useState(false);
   const [tourStep, setTourStep] = useState(0);
+  const [aiCredits, setAiCredits] = useState<number | null>(null);
 
   useEffect(() => {
     const tourCompleted = localStorage.getItem('avaz_tour_completed');
@@ -203,11 +204,11 @@ export const TemplateSelector: React.FC<TemplateSelectorProps> = ({
         
         onSelect(template);
       } else {
-        alert(t('ts_gen_error'));
+        alert(getLastAiErrorMessage() || t('ts_gen_error'));
       }
     } catch (error) {
       console.error('Generation Failed', error);
-      alert(t('ts_gen_fail'));
+      alert(getLastAiErrorMessage() || t('ts_gen_fail'));
     } finally {
       setIsGenerating(false);
     }
@@ -249,6 +250,17 @@ export const TemplateSelector: React.FC<TemplateSelectorProps> = ({
       unsubscribeSnapshot();
     };
   }, []);
+
+  useEffect(() => {
+    if (!user) {
+      setAiCredits(null);
+      return;
+    }
+    return onSnapshot(doc(db, 'users', user.uid), (snapshot) => {
+      const value = snapshot.data()?.aiCreditsBalance;
+      setAiCredits(typeof value === 'number' ? value : null);
+    });
+  }, [user]);
 
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
@@ -550,6 +562,9 @@ export const TemplateSelector: React.FC<TemplateSelectorProps> = ({
                         {t('ts_studio_desc')}
                       </p>
                     </div>
+                  </div>
+                  <div className="rounded-xl border border-cyan-400/20 bg-cyan-400/10 px-3 py-2 text-[10px] font-black text-cyan-100">
+                    AI Credit: {aiCredits ?? '-'}
                   </div>
                 </div>
 

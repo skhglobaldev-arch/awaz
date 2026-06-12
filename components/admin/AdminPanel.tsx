@@ -291,6 +291,7 @@ export const AdminPanel: React.FC<{ onBack: () => void }> = ({ onBack }) => {
   const [services, setServices] = useState<ServiceItem[]>(isLocalDemoAdmin ? demoServices : []);
   const [portfolio, setPortfolio] = useState<AnyRecord[]>(isLocalDemoAdmin ? demoPortfolio : []);
   const [admins, setAdmins] = useState<AdminMember[]>(isLocalDemoAdmin ? demoAdmins : []);
+  const [aiUsage, setAiUsage] = useState<AnyRecord[]>([]);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(!isLocalDemoAdmin);
   const [message, setMessage] = useState('');
@@ -324,6 +325,7 @@ export const AdminPanel: React.FC<{ onBack: () => void }> = ({ onBack }) => {
       onSnapshot(collection(db, 'services'), (snapshot) => setServices(snapshot.docs.map((item) => ({ id: item.id, ...item.data() })) as ServiceItem[])),
       onSnapshot(collection(db, 'portfolioItems'), (snapshot) => setPortfolio(snapshot.docs.map((item) => ({ id: item.id, ...item.data() })))),
       onSnapshot(collection(db, 'admins'), (snapshot) => setAdmins(snapshot.docs.map((item) => ({ id: item.id, ...item.data() })) as AdminMember[])),
+      onSnapshot(query(collection(db, 'aiUsage'), orderBy('createdAt', 'desc')), (snapshot) => setAiUsage(snapshot.docs.slice(0, 80).map((item) => ({ id: item.id, ...item.data() })))),
     ];
 
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
@@ -350,6 +352,7 @@ export const AdminPanel: React.FC<{ onBack: () => void }> = ({ onBack }) => {
   const selectedUser = users.find((user) => user.id === selectedUserId);
   const selectedUserOrders = selectedUserId ? orders.filter((order) => order.userId === selectedUserId) : [];
   const selectedUserDesigns = selectedUserId ? designs.filter((design) => design.authorUid === selectedUserId || design.userId === selectedUserId) : [];
+  const selectedUserAiUsage = selectedUserId ? aiUsage.filter((item) => item.userId === selectedUserId) : [];
 
   const showMessage = (text: string) => {
     setMessage(text);
@@ -502,6 +505,7 @@ export const AdminPanel: React.FC<{ onBack: () => void }> = ({ onBack }) => {
     const revenue = orders.filter((order) => order.paymentStatus === 'paid').reduce((sum, order) => sum + getOrderTotal(order), 0);
     const pending = orders.filter((order) => ['pending', 'paid', 'in_production'].includes(order.status)).length;
     const completed = orders.filter((order) => ['delivered', 'completed'].includes(order.status)).length;
+    const aiCreditsUsed = aiUsage.reduce((sum, item) => sum + Number(item.cost || 0), 0);
 
     return (
       <div className="space-y-6">
@@ -509,7 +513,11 @@ export const AdminPanel: React.FC<{ onBack: () => void }> = ({ onBack }) => {
           <StatCard label="کل سفارش ها" value={orders.length} icon={PackageCheck} tone="bg-blue-500/15 text-blue-300" />
           <StatCard label="در انتظار/تولید" value={pending} icon={Clock} tone="bg-amber-500/15 text-amber-300" />
           <StatCard label="تکمیل شده" value={completed} icon={Check} tone="bg-emerald-500/15 text-emerald-300" />
+          <StatCard label="AI Credit مصرف شده" value={aiCreditsUsed} icon={Wand2} tone="bg-cyan-500/15 text-cyan-300" />
+        </div>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <StatCard label="پرداخت تایید شده" value={money(revenue)} icon={DollarSign} tone="bg-violet-500/15 text-violet-300" />
+          <StatCard label="AI Request" value={aiUsage.length} icon={Wand2} tone="bg-fuchsia-500/15 text-fuchsia-300" />
         </div>
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -541,6 +549,20 @@ export const AdminPanel: React.FC<{ onBack: () => void }> = ({ onBack }) => {
                     <p className="text-xs text-slate-400">{supplier.completed} انجام شده / {supplier.pending} pending</p>
                   </div>
                   <p className="mt-1 text-sm text-slate-300">{money(supplier.revenue)}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+          <section className="rounded-2xl border border-white/10 bg-white/[0.04] p-5 lg:col-span-2">
+            <h2 className="mb-4 text-lg font-black text-white">AI Usage اخیر</h2>
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              {aiUsage.slice(0, 8).map((item) => (
+                <div key={item.id} className="rounded-xl bg-white/5 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="font-black text-white">{item.task}</p>
+                    <span className="rounded-full bg-cyan-400/10 px-2 py-1 text-xs font-black text-cyan-200">{item.cost} credit</span>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-400">{item.userEmail || item.customerCode || item.userId} - {statusLabel(item.status)}</p>
                 </div>
               ))}
             </div>
@@ -705,6 +727,9 @@ export const AdminPanel: React.FC<{ onBack: () => void }> = ({ onBack }) => {
               <StatCard label="سفارش ها" value={selectedUserOrders.length} icon={PackageCheck} tone="bg-blue-500/15 text-blue-300" />
               <StatCard label="طرح ها" value={selectedUserDesigns.length} icon={Wand2} tone="bg-violet-500/15 text-violet-300" />
               <StatCard label="مجموع خرید" value={money(selectedUserOrders.reduce((sum, order) => sum + getOrderTotal(order), 0))} icon={DollarSign} tone="bg-emerald-500/15 text-emerald-300" />
+              <StatCard label="AI Credit باقی مانده" value={selectedUser.aiCreditsBalance ?? 0} icon={Wand2} tone="bg-cyan-500/15 text-cyan-300" />
+              <StatCard label="AI Credit مصرف شده" value={selectedUser.aiCreditsTotalUsed ?? 0} icon={Wand2} tone="bg-fuchsia-500/15 text-fuchsia-300" />
+              <StatCard label="AI Plan" value={selectedUser.aiPlan || 'free'} icon={Shield} tone="bg-amber-500/15 text-amber-300" />
             </div>
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               {selectedUserOrders.map((order) => (
@@ -717,6 +742,12 @@ export const AdminPanel: React.FC<{ onBack: () => void }> = ({ onBack }) => {
                 <div key={design.id} className="rounded-xl bg-white/5 p-4">
                   <p className="font-black text-white">{design.name || design.title || 'طرح'}</p>
                   <p className="text-sm text-slate-400">{formatDate(design.createdAt)}</p>
+                </div>
+              ))}
+              {selectedUserAiUsage.slice(0, 8).map((item) => (
+                <div key={item.id} className="rounded-xl bg-cyan-400/5 p-4">
+                  <p className="font-black text-white">AI: {item.task} - {item.cost} credit</p>
+                  <p className="text-sm text-slate-400">{formatDate(item.createdAt)} - {statusLabel(item.status)}</p>
                 </div>
               ))}
             </div>
