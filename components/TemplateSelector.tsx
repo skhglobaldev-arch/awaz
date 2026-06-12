@@ -145,6 +145,10 @@ export const TemplateSelector: React.FC<TemplateSelectorProps> = ({
 
   const handleGenerate = async () => {
     if (!customPrompt.trim()) return;
+    if (!auth.currentUser) {
+      alert(isRtl ? 'برای ساخت طرح با هوش مصنوعی، ابتدا وارد حساب کاربری شوید.' : 'Sign in before generating an AI design.');
+      return;
+    }
     setIsGenerating(true);
     try {
       let industry = '';
@@ -219,29 +223,6 @@ export const TemplateSelector: React.FC<TemplateSelectorProps> = ({
   useEffect(() => {
     const unsubscribeAuth = onAuthStateChanged(auth, (u) => {
       setUser(u);
-      if (u) {
-        // Auto-clear old designs when user is logged in (to have permissions)
-        const clearOldDesigns = async () => {
-          try {
-            const { getDocs, deleteDoc, doc, collection, writeBatch } = await import('firebase/firestore');
-            const snapshot = await getDocs(collection(db, 'designs'));
-            if (snapshot.empty) {
-              console.log("No designs to clear.");
-              return;
-            }
-            
-            const batch = writeBatch(db);
-            snapshot.docs.forEach((d) => {
-              batch.delete(doc(db, 'designs', d.id));
-            });
-            await batch.commit();
-            console.log(`Successfully cleared ${snapshot.size} old designs.`);
-          } catch (err) {
-            console.error("Failed to auto-clear designs:", err);
-          }
-        };
-        clearOldDesigns();
-      }
     });
 
     const unsubscribeSnapshot = onSnapshot(query(collection(db, 'designs')), (snapshot) => {

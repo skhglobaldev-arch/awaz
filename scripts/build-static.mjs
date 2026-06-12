@@ -21,10 +21,7 @@ await esbuild.build({
     '.json': 'json',
   },
   define: {
-    'process.env': JSON.stringify({
-      API_KEY: process.env.API_KEY || '',
-      GEMINI_API_KEY: process.env.GEMINI_API_KEY || '',
-    }),
+    'process.env': JSON.stringify({}),
   },
   plugins: [
     {

@@ -12,6 +12,7 @@ const db = getFirestore(adminApp, DATABASE_ID);
 
 const stripeSecretKey = defineSecret('STRIPE_SECRET_KEY');
 const stripeWebhookSecret = defineSecret('STRIPE_WEBHOOK_SECRET');
+const geminiApiKey = defineSecret('GEMINI_API_KEY');
 
 const UNIT_PRICE_CENTS = {
   retail: 4,
@@ -122,6 +123,321 @@ function safeMockup(input) {
     } : null,
   };
 }
+
+async function geminiClient() {
+  const { GoogleGenAI } = await import('@google/genai');
+  return new GoogleGenAI({ apiKey: geminiApiKey.value() });
+}
+
+function stripDataUrl(value) {
+  const input = text(value, 8_000_000);
+  const match = input.match(/^data:([^;]+);base64,(.+)$/);
+  return {
+    mimeType: match ? match[1] : 'image/jpeg',
+    data: match ? match[2] : input,
+  };
+}
+
+function parseJsonResponse(value, fallback) {
+  const raw = text(value, 80_000)
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    const firstObject = raw.indexOf('{');
+    const lastObject = raw.lastIndexOf('}');
+    if (firstObject >= 0 && lastObject > firstObject) {
+      try {
+        return JSON.parse(raw.slice(firstObject, lastObject + 1));
+      } catch (_) {}
+    }
+    const firstArray = raw.indexOf('[');
+    const lastArray = raw.lastIndexOf(']');
+    if (firstArray >= 0 && lastArray > firstArray) {
+      try {
+        return JSON.parse(raw.slice(firstArray, lastArray + 1));
+      } catch (_) {}
+    }
+    return fallback;
+  }
+}
+
+const CATEGORY_IDS = new Set([
+  'restaurant_menu', 'restaurant_card', 'restaurant_brochure', 'restaurant_logo',
+  'cafe_menu', 'cafe_card', 'cafe_brochure', 'cafe_logo',
+  'fastfood_menu', 'fastfood_card', 'fastfood_brochure', 'fastfood_logo',
+  'medical_logo', 'medical_card', 'medical_brochure',
+  'corporate_logo', 'corporate_card', 'corporate_brochure',
+]);
+
+function inferCategoryId(input) {
+  let categoryId = CATEGORY_IDS.has(input.initialCategoryId) ? input.initialCategoryId : 'restaurant_menu';
+  const industry = text(input.industry, 120);
+  const subIndustry = text(input.subIndustry, 120);
+  const itemType = text(input.itemType, 80).toLowerCase();
+
+  const isRestaurant = subIndustry.includes('رستوران') || /restaurant/i.test(subIndustry);
+  const isCafe = subIndustry.includes('کافی') || /cafe|coffee/i.test(subIndustry);
+  const isFastfood = subIndustry.includes('فست') || /fast/i.test(subIndustry);
+  const isMedical = industry.includes('پزشکی') || /medical|clinic/i.test(industry);
+  const isCorporate = industry.includes('شرکتی') || /corporate|business/i.test(industry);
+
+  const suffix = itemType.includes('منو') || itemType.includes('menu')
+    ? 'menu'
+    : itemType.includes('کارت') || itemType.includes('card')
+      ? 'card'
+      : itemType.includes('لوگو') || itemType.includes('logo')
+        ? 'logo'
+        : itemType.includes('بروشور') || itemType.includes('brochure')
+          ? 'brochure'
+          : '';
+  if (!suffix) return categoryId;
+
+  const prefix = isRestaurant ? 'restaurant' : isCafe ? 'cafe' : isFastfood ? 'fastfood' : isMedical ? 'medical' : isCorporate ? 'corporate' : '';
+  const inferred = prefix ? `${prefix}_${suffix}` : categoryId;
+  return CATEGORY_IDS.has(inferred) ? inferred : categoryId;
+}
+
+function designKindFromCategory(categoryId, itemType) {
+  const hint = text(itemType, 80);
+  if (hint) return hint;
+  if (categoryId.includes('brochure')) return 'بروشور';
+  if (categoryId.includes('card')) return 'کارت ویزیت';
+  if (categoryId.includes('logo')) return 'لوگو';
+  if (categoryId.includes('menu')) return 'منو';
+  return 'طرح چاپی';
+}
+
+function fallbackTemplate(input, categoryId) {
+  const businessName = text(input.businessName, 100) || 'نام کسب و کار';
+  const designType = designKindFromCategory(categoryId, input.itemType);
+  return {
+    id: `custom-template-${Date.now()}`,
+    categoryId,
+    name: `${designType} ${businessName}`.slice(0, 99),
+    description: 'طرح پیشنهادی آماده ویرایش برای چاپ حرفه‌ای',
+    thumbnail: 'https://images.unsplash.com/photo-1626785774573-4b799315345d?q=80&w=500&auto=format&fit=crop',
+    thumbnailColor: 'linear-gradient(135deg, #2563eb 0%, #f97316 100%)',
+    layoutType: 'modern',
+    defaultData: {
+      title: businessName,
+      subtitle: 'طراحی حرفه‌ای، خوانا و آماده چاپ',
+      contact: '۰۹۱۲ ۰۰۰ ۰۰۰۰ | info@example.com',
+      colors: { primary: '#1e40af', accent: '#f97316', background: '#ffffff', text: '#111827' },
+      fonts: { title: 'Lalezar', body: 'Vazirmatn' },
+      customText: 'حاشیه امن، کنتراست مناسب و آماده‌سازی چاپ رعایت شود.',
+      sections: [
+        { id: 's1', title: 'معرفی', items: [{ id: 'i1', name: 'خدمت اصلی', price: '', description: 'توضیح کوتاه و قابل چاپ برای معرفی برند' }] },
+        { id: 's2', title: 'مزیت‌ها', items: [{ id: 'i2', name: 'کیفیت چاپ', price: '', description: 'رنگ خوانا، چیدمان تمیز و خروجی حرفه‌ای' }] },
+      ],
+    },
+  };
+}
+
+function normalizeTemplate(template, input, categoryId) {
+  const fallback = fallbackTemplate(input, categoryId);
+  const data = template && typeof template === 'object' ? template : {};
+  const defaultData = data.defaultData && typeof data.defaultData === 'object' ? data.defaultData : fallback.defaultData;
+  return {
+    id: `custom-template-${Date.now()}`,
+    categoryId,
+    name: text(data.name, 99) || fallback.name,
+    description: text(data.description, 999) || fallback.description,
+    thumbnail: text(data.thumbnail, 600) || fallback.thumbnail,
+    thumbnailColor: text(data.thumbnailColor, 99) || fallback.thumbnailColor,
+    layoutType: ['classic', 'modern', 'colorful', 'minimal', 'typographic', 'elegant'].includes(data.layoutType)
+      ? data.layoutType
+      : 'modern',
+    defaultData: {
+      title: text(defaultData.title, 120) || fallback.defaultData.title,
+      subtitle: text(defaultData.subtitle, 180) || fallback.defaultData.subtitle,
+      contact: text(defaultData.contact, 180) || fallback.defaultData.contact,
+      logo: text(defaultData.logo, 700_000) || undefined,
+      backgroundImage: text(defaultData.backgroundImage, 700_000) || undefined,
+      colors: {
+        primary: text(defaultData.colors && defaultData.colors.primary, 24) || fallback.defaultData.colors.primary,
+        accent: text(defaultData.colors && defaultData.colors.accent, 24) || fallback.defaultData.colors.accent,
+        background: text(defaultData.colors && defaultData.colors.background, 24) || fallback.defaultData.colors.background,
+        text: text(defaultData.colors && defaultData.colors.text, 24) || fallback.defaultData.colors.text,
+      },
+      fonts: {
+        title: text(defaultData.fonts && defaultData.fonts.title, 60) || 'Lalezar',
+        body: text(defaultData.fonts && defaultData.fonts.body, 60) || 'Vazirmatn',
+      },
+      customText: text(defaultData.customText, 500) || fallback.defaultData.customText,
+      border: defaultData.border || undefined,
+      sections: Array.isArray(defaultData.sections) && defaultData.sections.length
+        ? defaultData.sections.slice(0, 6).map((section, sectionIndex) => ({
+          id: text(section.id, 40) || `s${sectionIndex + 1}`,
+          title: text(section.title, 80) || `بخش ${sectionIndex + 1}`,
+          items: Array.isArray(section.items) ? section.items.slice(0, 8).map((item, itemIndex) => ({
+            id: text(item.id, 40) || `i${sectionIndex + 1}-${itemIndex + 1}`,
+            name: text(item.name, 100) || 'آیتم',
+            price: text(item.price, 40),
+            description: text(item.description, 180),
+          })) : [],
+        }))
+        : fallback.defaultData.sections,
+    },
+  };
+}
+
+function buildPrintDesignStrategyPrompt(input, categoryId) {
+  const businessName = text(input.businessName, 100) || 'نام کسب و کار';
+  const industryName = text(input.industry, 120) || 'عمومی';
+  const subIndustryName = text(input.subIndustry, 120);
+  const designType = designKindFromCategory(categoryId, input.itemType);
+  const userBrief = text(input.prompt, 2000);
+
+  return `
+You are the senior creative director and print-production strategist at Awaz Design & Print Studio.
+Create a commercially usable, print-ready Persian/RTL concept for "${designType}".
+
+Business:
+- Name: ${businessName}
+- Industry: ${industryName}${subIndustryName ? ` / ${subIndustryName}` : ''}
+- Client brief: ${userBrief}
+- Category ID: ${categoryId}
+
+Design requirements:
+- Use fluent Persian for all visible copy unless brand, URL, email, or phone.
+- Respect print-safe hierarchy, bleed/crop safety, readable sizes, high contrast, and CMYK-friendly color choices.
+- Business card: prioritize name, role, contact, memorable identity, minimal back-side information.
+- Brochure: organize into clear panels/sections: معرفی، خدمات، مزیت‌ها، دعوت به اقدام.
+- Menu: create logical categories, readable prices, appetite-driven short descriptions.
+- Logo: create scalable, iconic, simple brand guidance suitable for signage, stamp, packaging, social media, embroidery and merch.
+
+Return only valid JSON with this structure:
+{
+  "name": "نام فارسی طرح",
+  "description": "توضیح کوتاه فارسی",
+  "thumbnailColor": "linear-gradient(135deg, #color1 0%, #color2 100%)",
+  "layoutType": "modern",
+  "defaultData": {
+    "title": "${businessName}",
+    "subtitle": "شعار فارسی",
+    "contact": "اطلاعات تماس",
+    "colors": { "primary": "#hex", "accent": "#hex", "background": "#hex", "text": "#hex" },
+    "fonts": { "title": "Lalezar", "body": "Vazirmatn" },
+    "customText": "یادداشت کوتاه استراتژی چاپ یا CTA",
+    "sections": [
+      { "id": "s1", "title": "عنوان بخش", "items": [{ "id": "i1", "name": "نام", "price": "قیمت اختیاری", "description": "توضیح کوتاه" }] }
+    ]
+  }
+}`;
+}
+
+async function generateImageDataUrl(client, prompt, aspectRatio) {
+  const response = await client.models.generateContent({
+    model: 'gemini-2.5-flash-image',
+    contents: { parts: [{ text: prompt }] },
+    config: { imageConfig: { aspectRatio, imageSize: '1K' } },
+  });
+  for (const part of response.candidates?.[0]?.content?.parts || []) {
+    if (part.inlineData?.data) {
+      return `data:${part.inlineData.mimeType || 'image/png'};base64,${part.inlineData.data}`;
+    }
+  }
+  return null;
+}
+
+exports.generateAiContent = onCall({ region: REGION, secrets: [geminiApiKey], timeoutSeconds: 180, memory: '512MiB' }, async (request) => {
+  if (!request.auth) {
+    throw new HttpsError('unauthenticated', 'Sign in before using AI generation.');
+  }
+
+  const input = request.data || {};
+  const task = text(input.task, 40);
+  const client = await geminiClient();
+
+  if (task === 'description') {
+    const prompt = `برای آیتم منوی "${text(input.itemName, 120)}" در دسته "${text(input.categoryName, 120)}" یک توضیح فارسی کوتاه، اشتهابرانگیز و قابل چاپ بنویس. حداکثر ۱۵ کلمه.`;
+    const response = await client.models.generateContent({ model: 'gemini-3-flash-preview', contents: prompt });
+    return { text: text(response.text, 500) || 'توضیحات یافت نشد.' };
+  }
+
+  if (task === 'analyzeLogo') {
+    const image = stripDataUrl(input.image);
+    const response = await client.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: [
+        { text: 'این لوگو را مثل طراح برند و کارشناس چاپ تحلیل کن: سبک بصری، رنگ، خوانایی در ابعاد کوچک، قابلیت چاپ روی هودی/ماگ/تیشرت، ریسک‌های چاپی و پیشنهاد اصلاحی. پاسخ فارسی و کاربردی باشد.' },
+        { inlineData: { mimeType: image.mimeType, data: image.data } },
+      ],
+    });
+    return { text: text(response.text, 3000) || 'تحلیل تصویر انجام نشد.' };
+  }
+
+  if (task === 'businessCard') {
+    const prompt = `برای کارت ویزیت چاپی یک شعار کوتاه و یک توضیح یک‌خطی فارسی بساز. نام کسب‌وکار: "${text(input.businessName, 120)}". توضیح: "${text(input.description, 500)}". فقط JSON بده: { "slogan": "...", "description": "..." }`;
+    const response = await client.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: prompt,
+      config: { responseMimeType: 'application/json' },
+    });
+    const result = parseJsonResponse(response.text, {});
+    return {
+      slogan: text(result.slogan, 120) || 'خلاقیت در هر قدم',
+      description: text(result.description, 220) || 'همراه شما در مسیر موفقیت',
+    };
+  }
+
+  if (task === 'menuItems') {
+    const prompt = `برای منوی چاپی یک "${text(input.businessType, 120)}" پنج آیتم محبوب و واقعی پیشنهاد بده. هر آیتم فارسی، خوانا و مناسب چاپ باشد. قیمت با فرمت تومان مثل "۱۵۰,۰۰۰ ت". فقط JSON array بده: [{ "name": "...", "price": "...", "description": "..." }]`;
+    const response = await client.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: prompt,
+      config: { responseMimeType: 'application/json' },
+    });
+    const items = parseJsonResponse(response.text, []);
+    return {
+      items: Array.isArray(items) ? items.slice(0, 8).map((item, index) => ({
+        id: `ai-${index}-${Date.now()}`,
+        name: text(item.name, 100) || 'آیتم پیشنهادی',
+        price: text(item.price, 40),
+        description: text(item.description, 180),
+      })) : [],
+    };
+  }
+
+  if (task === 'backgroundImage') {
+    const image = await generateImageDataUrl(
+      client,
+      `Create a high-quality print-design background. Theme: ${text(input.prompt, 500)}. Must support readable Persian text overlay, calm negative space, CMYK-friendly colors, no busy details behind text, premium commercial look.`,
+      ['1:1', '9:16', '16:9'].includes(input.aspectRatio) ? input.aspectRatio : '9:16'
+    );
+    return { image };
+  }
+
+  if (task === 'logo') {
+    const image = await generateImageDataUrl(
+      client,
+      `A professional, minimalist, vector-like logo for a business named "${text(input.businessName, 120)}" in the ${text(input.industry, 120)} industry. Scalable, iconic, high contrast, suitable for print, signage, stamp, embroidery, packaging and social media. White background, centered, premium brand identity.`,
+      '1:1'
+    );
+    return { image };
+  }
+
+  if (task === 'template') {
+    const categoryId = inferCategoryId(input);
+    const response = await client.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: `Create a print-ready professional template. User prompt: ${text(input.prompt, 2000)}`,
+      config: {
+        systemInstruction: buildPrintDesignStrategyPrompt(input, categoryId),
+        responseMimeType: 'application/json',
+      },
+    });
+    const parsed = parseJsonResponse(response.text, null);
+    const template = normalizeTemplate(parsed, input, categoryId);
+    return { template };
+  }
+
+  throw new HttpsError('invalid-argument', 'Unknown AI task.');
+});
 
 function stripeClient() {
   return new Stripe(stripeSecretKey.value());
